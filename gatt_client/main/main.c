@@ -184,7 +184,7 @@ static esp_err_t cccd_write(uint16_t value_le)
         ESP_LOGE(TAG, "write_char_descr failed: %s", esp_err_to_name(err));
         return err;
     }
-
+    
     reset_notify_next_value();
     ESP_LOGI(TAG, "CCCD write requested: 0x%04x", value_le);
     return ESP_OK;

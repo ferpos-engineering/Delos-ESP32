@@ -156,8 +156,6 @@ static void heart_rate_task(void* param)
         }
 
         vTaskDelay(pdMS_TO_TICKS(1000));
-
-        // vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
 }
 

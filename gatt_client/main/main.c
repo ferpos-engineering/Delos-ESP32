@@ -40,6 +40,7 @@
 
 // --------------------- CONFIG ---------------------
 
+#define MTU                         23
 #define PROFILE_NUM                 1
 #define PROFILE_A_APP_ID            0
 
@@ -522,6 +523,11 @@ void app_main(void)
     if (ret) {
         ESP_LOGE(TAG, "bluedroid_enable failed: %s", esp_err_to_name(ret));
         return;
+    }
+
+    ret = esp_ble_gatt_set_local_mtu(MTU);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "set_local_mtu(%d) failed: %s", MTU, esp_err_to_name(ret));
     }
 
     ret = esp_ble_gap_register_callback(esp_gap_cb);

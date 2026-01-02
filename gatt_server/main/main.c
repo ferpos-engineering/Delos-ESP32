@@ -32,6 +32,7 @@
 #define HEART_NUM_HANDLE 4
 #define AUTO_IO_SVC_UUID 0x1815
 #define AUTO_IO_NUM_HANDLE 7
+#define MTU 23 // impostare 50 se bytes trasferiti in notify aumentano
 
 #define ADV_CONFIG_FLAG      (1 << 0)
 #define SCAN_RSP_CONFIG_FLAG (1 << 1)
@@ -162,7 +163,7 @@ static void heart_rate_task(void* param)
 static void stream_notify_task(void *arg)
 {
     TickType_t last = xTaskGetTickCount();
-    uint32_t counter = 0;
+    uint32_t counter = 1;
     ESP_LOGI(GATTS_TAG, "Stream notify Task Start");
 
     while (1) {
@@ -527,8 +528,14 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
         esp_ble_conn_update_params_t conn_params = {0};
         memcpy(conn_params.bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
         conn_params.latency = 0;
-        conn_params.max_int = 0x10; // 20ms
-        conn_params.min_int = 0x08; // 10ms
+
+        // 1 peripheral
+        // conn_params.max_int = 0x10; // 20ms
+        // conn_params.min_int = 0x08; // 10ms
+        
+        // 3 peripherals
+        conn_params.min_int = 0x18; // 30ms
+        conn_params.max_int = 0x28; // 50ms
         conn_params.timeout = 400;
         ESP_LOGI(GATTS_TAG, "Connected, conn_id %u, remote "ESP_BD_ADDR_STR"",
                 param->connect.conn_id, ESP_BD_ADDR_HEX(param->connect.remote_bda));
@@ -666,7 +673,7 @@ void app_main(void)
         return;
     }
 
-    ret = esp_ble_gatt_set_local_mtu(500);
+    ret = esp_ble_gatt_set_local_mtu(MTU);
     if (ret) {
         ESP_LOGE(GATTS_TAG, "set local  MTU failed, error code = %x", ret);
     }

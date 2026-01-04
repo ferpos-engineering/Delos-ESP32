@@ -120,6 +120,45 @@ static uint16_t stream_length_ms_char_handle = 0;
 static esp_gatt_if_t stream_gatts_if = ESP_GATT_IF_NONE;
 static uint16_t stream_conn_id = 0;
 static TaskHandle_t stream_task_handle = NULL;
+
+// Descriptor context (ESP-IDF doesn't provide the parent char_handle in ESP_GATTS_ADD_CHAR_DESCR_EVT here)
+typedef enum {
+    PENDING_NONE = 0,
+    PENDING_STREAM_CCCD,
+    PENDING_LENGTH_USER_DESC,
+    PENDING_STREAM_USER_DESC,
+} pending_descr_t;
+
+static volatile pending_descr_t s_pending_descr = PENDING_NONE;
+static uint16_t length_user_desc_handle = 0;
+
+// 0x2901 Characteristic User Description (visible in BLE tools like nRF Connect)
+static const esp_bt_uuid_t user_desc_uuid = {
+    .len = ESP_UUID_LEN_16,
+    .uuid = { .uuid16 = ESP_GATT_UUID_CHAR_DESCRIPTION }, // 0x2901
+};
+
+// User Description for STREAM (0x2901)
+static const uint8_t stream_user_desc_str[] = "Stream data (notify)";
+static esp_attr_value_t stream_user_desc_val = {
+    .attr_max_len = sizeof(stream_user_desc_str) - 1,  // exclude '\0'
+    .attr_len     = sizeof(stream_user_desc_str) - 1,
+    .attr_value   = (uint8_t*)stream_user_desc_str,
+};
+
+static uint16_t stream_user_desc_handle = 0;
+static bool stream_user_desc_pending = false;
+
+// String must remain valid for the whole runtime (static)
+static const uint8_t length_user_desc_str[] = "Stream duration (ms)";
+
+// Initial value for the 0x2901 descriptor
+static esp_attr_value_t length_user_desc_val = {
+    .attr_max_len = sizeof(length_user_desc_str) - 1,  // exclude '\0'
+    .attr_len     = sizeof(length_user_desc_str) - 1,
+    .attr_value   = (uint8_t*)length_user_desc_str,
+};
+
 static esp_ble_adv_data_t adv_data = {
     .set_scan_rsp = false,
     .include_name = true,
@@ -466,6 +505,11 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
                 .uuid = { .uuid16 = ESP_GATT_UUID_CHAR_CLIENT_CONFIG },
             };
 
+            // Add also 0x2901 User Description for STREAM after CCCD is created
+            stream_user_desc_pending = true;
+
+            s_pending_descr = PENDING_STREAM_CCCD;
+
             esp_err_t dret = esp_ble_gatts_add_char_descr(
                 gl_profile_tab[AUTO_IO_PROFILE_APP_ID].service_handle,
                 &cccd_uuid,
@@ -475,6 +519,8 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
             );
             if (dret) {
                 ESP_LOGE(GATTS_TAG, "add STREAM CCCD failed, error code = %x", dret);
+                s_pending_descr = PENDING_NONE;
+                stream_user_desc_pending = false;
             }
         }
         else if (param->add_char.char_uuid.len == ESP_UUID_LEN_128 &&
@@ -484,21 +530,19 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
             stream_length_ms_char_handle = param->add_char.attr_handle;
             ESP_LOGI(GATTS_TAG, "STREAM length milliseconds char handle=%u", stream_length_ms_char_handle);
 
-            // Add uuid for notifications
-            esp_bt_uuid_t uuid = {
-                .len = ESP_UUID_LEN_16,
-                .uuid = { .uuid16 = ESP_GATT_UUID_CHAR_DESCRIPTION },
-            };
+            // Add 0x2901 User Description descriptor (string shown by BLE tools)
+            s_pending_descr = PENDING_LENGTH_USER_DESC;
 
             esp_err_t dret = esp_ble_gatts_add_char_descr(
                 gl_profile_tab[AUTO_IO_PROFILE_APP_ID].service_handle,
-                &uuid,
-                ESP_GATT_PERM_WRITE,
-                NULL,
+                &user_desc_uuid,
+                ESP_GATT_PERM_READ,
+                &length_user_desc_val,
                 NULL
             );
             if (dret) {
-                ESP_LOGE(GATTS_TAG, "add STREAM length milliseconds failed, error code = %x", dret);
+                ESP_LOGE(GATTS_TAG, "add STREAM length milliseconds UserDesc failed, error code = %x", dret);
+                s_pending_descr = PENDING_NONE;
             }
         } else {
             // LED characteristic handle
@@ -513,40 +557,65 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
 
         if (param->add_char_descr.status != ESP_GATT_OK) {
             ESP_LOGE(GATTS_TAG, "ADD_CHAR_DESCR failed, status=%d", param->add_char_descr.status);
+            // reset pending state to avoid poisoning subsequent descriptor adds
+            s_pending_descr = PENDING_NONE;
+            stream_user_desc_pending = false;
             break;
         }
 
-        const uint16_t descr_handle = param->add_char_descr.attr_handle;
-        const uint16_t char_handle  = param->add_char_descr.char_handle;
+        switch (s_pending_descr) {
 
-        // riconosci solo descrittori 16-bit (CCCD e User Description lo sono)
-        uint16_t descr_uuid16 = 0;
-        if (param->add_char_descr.descr_uuid.len == ESP_UUID_LEN_16) {
-            descr_uuid16 = param->add_char_descr.descr_uuid.uuid.uuid16;
-        }
+        case PENDING_STREAM_CCCD:
+            stream_cccd_handle = param->add_char_descr.attr_handle;
+            ESP_LOGI(GATTS_TAG, "STREAM CCCD handle=%u (0x%04X)", stream_cccd_handle, stream_cccd_handle);
 
-        // 1) STREAM: salva SOLO la CCCD (0x2902)
-        if (char_handle == stream_char_handle && descr_uuid16 == ESP_GATT_UUID_CHAR_CLIENT_CONFIG) {
-            stream_cccd_handle = descr_handle;
-            ESP_LOGI(GATTS_TAG, "STREAM CCCD handle = %u (0x%04X)", stream_cccd_handle, stream_cccd_handle);
+            // If requested, add 0x2901 User Description for STREAM now (after CCCD exists).
+            // IMPORTANT: do NOT clear s_pending_descr here; the next DESCR_EVT will belong to PENDING_STREAM_USER_DESC.
+            if (stream_user_desc_pending) {
+                stream_user_desc_pending = false;
+                s_pending_descr = PENDING_STREAM_USER_DESC;
+
+                esp_err_t dret2 = esp_ble_gatts_add_char_descr(
+                    gl_profile_tab[AUTO_IO_PROFILE_APP_ID].service_handle,
+                    &user_desc_uuid,
+                    ESP_GATT_PERM_READ,
+                    &stream_user_desc_val,
+                    NULL
+                );
+                if (dret2) {
+                    ESP_LOGE(GATTS_TAG, "add STREAM UserDesc failed, error code = %x", dret2);
+                    s_pending_descr = PENDING_NONE;
+                }
+                break;
+            }
+
+            s_pending_descr = PENDING_NONE;
+            break;
+
+        case PENDING_STREAM_USER_DESC:
+            stream_user_desc_handle = param->add_char_descr.attr_handle;
+            ESP_LOGI(GATTS_TAG, "STREAM UserDesc handle=%u (0x%04X)", stream_user_desc_handle, stream_user_desc_handle);
+            s_pending_descr = PENDING_NONE;
+            break;
+
+        case PENDING_LENGTH_USER_DESC:
+            length_user_desc_handle = param->add_char_descr.attr_handle;
+            ESP_LOGI(GATTS_TAG, "LENGTH UserDesc handle=%u (0x%04X)", length_user_desc_handle, length_user_desc_handle);
+            s_pending_descr = PENDING_NONE;
+            break;
+
+        default:
+            ESP_LOGW(GATTS_TAG, "Descriptor added but no pending context. handle=%u (0x%04X)",
+                    param->add_char_descr.attr_handle, param->add_char_descr.attr_handle);
+            s_pending_descr = PENDING_NONE;
             break;
         }
 
-        // 2) LENGTH: qui NON vuoi CCCD. Se aggiungi 0x2901 (User Description), log e basta.
-        if (char_handle == stream_length_ms_char_handle) {
-            ESP_LOGI(GATTS_TAG, "LENGTH descr added uuid16=0x%04X, handle=%u (0x%04X)",
-                    descr_uuid16, descr_handle, descr_handle);
-            break;
-        }
-
-        // 3) altri descrittori: non toccare stream_cccd_handle
-        ESP_LOGI(GATTS_TAG, "Descr added for char_handle=%u (0x%04X), uuid16=0x%04X, descr_handle=%u (0x%04X)",
-                char_handle, char_handle, descr_uuid16, descr_handle, descr_handle);
         break;
     }
 
-
     case ESP_GATTS_READ_EVT:
+
         ESP_LOGI(GATTS_TAG, "Characteristic read");
         esp_gatt_rsp_t rsp;
         memset(&rsp, 0, sizeof(esp_gatt_rsp_t));

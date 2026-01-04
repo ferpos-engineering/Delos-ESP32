@@ -31,7 +31,7 @@
 #define HEART_RATE_CHAR_UUID 0x2A37
 #define HEART_NUM_HANDLE 4
 #define AUTO_IO_SVC_UUID 0x1815
-#define AUTO_IO_NUM_HANDLE 7
+#define AUTO_IO_NUM_HANDLE 10
 #define MTU 23 // impostare 50 se bytes trasferiti in notify aumentano
 
 #define ADV_CONFIG_FLAG      (1 << 0)
@@ -64,9 +64,11 @@ static esp_gatt_char_prop_t heart_property = 0;
 static esp_gatt_char_prop_t auto_io_property = 0;
 static uint8_t heart_rate_val[2] = {0};
 static uint8_t led_status[2] = {0};
+static uint8_t stream_length_ms[4] = {0};
 static bool indicate_enabled = false;
 static bool hrs_create_cmpl = false;  // Heart Rate Service
 static uint8_t adv_config_done = 0;
+static uint32_t lenght_ms = 30000;
 
 static esp_attr_value_t heart_rate_attr = {
     .attr_max_len = 2,
@@ -80,16 +82,27 @@ static esp_attr_value_t led_status_attr = {
     .attr_value   = led_status,
 };
 
+static esp_attr_value_t stream_length_ms_attr = {
+    .attr_max_len = 4,
+    .attr_len     = sizeof(stream_length_ms),
+    .attr_value   = stream_length_ms,
+};
+
 // ---- LED (Write) ----
-// 128-bit UUID for the LED service (change if you want)
+// 128-bit UUID for the LED service
 static const uint8_t led_chr_uuid[] = {
     0x23, 0xd1, 0xbc, 0xea, 0x5f, 0x78, 0x23, 0x15, 0xde, 0xef, 0x12, 0x12, 0x25, 0x15, 0x00, 0x00
 };
 
 // ---- STREAM NOTIFY (16 bytes every 10ms) ----
-// 128-bit UUID for the streaming characteristic (change if you want)
+// 128-bit UUID for the streaming characteristic
 static const uint8_t stream_chr_uuid[] = {
     0x23, 0xd1, 0xbc, 0xea, 0x5f, 0x78, 0x23, 0x15, 0xde, 0xef, 0x12, 0x12, 0x25, 0x15, 0x00, 0x01
+};
+
+// 128-bit UUID for the lenght of the streaming in milliseconds
+static const uint8_t stream_length_ms_chr_uuid[] = {
+    0x23, 0xd1, 0xbc, 0xea, 0x5f, 0x78, 0x23, 0x15, 0xde, 0xef, 0x12, 0x12, 0x25, 0x15, 0x00, 0x02
 };
 
 static uint8_t stream_payload[16] = {0};
@@ -103,6 +116,7 @@ static esp_attr_value_t stream_attr = {
 static bool stream_notify_enabled = false;
 static uint16_t stream_char_handle = 0;
 static uint16_t stream_cccd_handle = 0;
+static uint16_t stream_length_ms_char_handle = 0;
 static esp_gatt_if_t stream_gatts_if = ESP_GATT_IF_NONE;
 static uint16_t stream_conn_id = 0;
 static TaskHandle_t stream_task_handle = NULL;
@@ -170,7 +184,7 @@ static void stream_notify_task(void *arg)
 
         if (stream_notify_enabled && stream_gatts_if != ESP_GATT_IF_NONE && stream_char_handle != 0) {
 
-          	// Example payload: counter in first 4 bytes + pattern
+              // Example payload: counter in first 4 bytes + pattern
             memcpy(stream_payload, &counter, sizeof(counter));
             for (int i = 4; i < 16; i++) {
                 stream_payload[i] = (uint8_t)(counter + i);
@@ -385,6 +399,7 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
         gl_profile_tab[AUTO_IO_PROFILE_APP_ID].service_id.id.uuid.uuid.uuid16 = AUTO_IO_SVC_UUID;
         esp_ble_gatts_create_service(gatts_if, &gl_profile_tab[AUTO_IO_PROFILE_APP_ID].service_id, AUTO_IO_NUM_HANDLE);
         break;
+
     case ESP_GATTS_CREATE_EVT:
         //service has been created, now add characteristic declaration
         ESP_LOGI(GATTS_TAG, "Service create, status %d, service_handle %d", param->create.status, param->create.service_handle);
@@ -401,30 +416,46 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
         if (ret) {
             ESP_LOGE(GATTS_TAG, "add char failed, error code = %x", ret);
         }
-		
-		// Add STREAM characteristic (NOTIFY, 16 bytes)
-		esp_bt_uuid_t stream_uuid = { .len = ESP_UUID_LEN_128 };
-		memcpy(stream_uuid.uuid.uuid128, stream_chr_uuid, ESP_UUID_LEN_128);
-		
-		esp_gatt_char_prop_t stream_prop = ESP_GATT_CHAR_PROP_BIT_NOTIFY;
-		ret = esp_ble_gatts_add_char(gl_profile_tab[AUTO_IO_PROFILE_APP_ID].service_handle,
-		                             &stream_uuid,
-		                             ESP_GATT_PERM_READ,
-		                             stream_prop,
-		                             &stream_attr,
-		                             NULL);
-		if (ret) {
-		    ESP_LOGE(GATTS_TAG, "add STREAM char failed, error code = %x", ret);
-		}
+        
+        // Add STREAM characteristic (NOTIFY, 16 bytes)
+        esp_bt_uuid_t stream_uuid = { .len = ESP_UUID_LEN_128 };
+        memcpy(stream_uuid.uuid.uuid128, stream_chr_uuid, ESP_UUID_LEN_128);
+        
+        esp_gatt_char_prop_t stream_prop = ESP_GATT_CHAR_PROP_BIT_NOTIFY;
+        ret = esp_ble_gatts_add_char(gl_profile_tab[AUTO_IO_PROFILE_APP_ID].service_handle,
+                                     &stream_uuid,
+                                     ESP_GATT_PERM_READ,
+                                     stream_prop,
+                                     &stream_attr,
+                                     NULL);
+        if (ret) {
+            ESP_LOGE(GATTS_TAG, "add STREAM char failed, error code = %x", ret);
+        }
+
+        // Add STREAM length in milliseconds characteristic (WRITE, 4 bytes)
+        esp_bt_uuid_t stream_length_ms_uuid = { .len = ESP_UUID_LEN_128 };
+        memcpy(stream_length_ms_uuid.uuid.uuid128, stream_length_ms_chr_uuid, ESP_UUID_LEN_128);
+        
+        esp_gatt_char_prop_t stream_length_ms_prop = ESP_GATT_CHAR_PROP_BIT_WRITE;
+        ret = esp_ble_gatts_add_char(gl_profile_tab[AUTO_IO_PROFILE_APP_ID].service_handle,
+                                     &stream_length_ms_uuid,
+                                     ESP_GATT_PERM_WRITE,
+                                     stream_length_ms_prop,
+                                     &stream_length_ms_attr,
+                                     NULL);
+        if (ret) {
+            ESP_LOGE(GATTS_TAG, "add STREAM length in milliseconds char failed, error code = %x", ret);
+        }        
         break;
 
     case ESP_GATTS_ADD_CHAR_EVT:
         ESP_LOGI(GATTS_TAG, "AUTO_IO: add char, status %d, attr_handle %d",
                 param->add_char.status, param->add_char.attr_handle);
 
-        // Distinguish LED characteristic vs STREAM characteristic by UUID
+        // Distinguish between characteristscs by UUID
         if (param->add_char.char_uuid.len == ESP_UUID_LEN_128 &&
             memcmp(param->add_char.char_uuid.uuid.uuid128, stream_chr_uuid, ESP_UUID_LEN_128) == 0) {
+            // This is STREAM characteristic
 
             stream_char_handle = param->add_char.attr_handle;
             ESP_LOGI(GATTS_TAG, "STREAM char handle=%u", stream_char_handle);
@@ -445,21 +476,75 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
             if (dret) {
                 ESP_LOGE(GATTS_TAG, "add STREAM CCCD failed, error code = %x", dret);
             }
+        }
+        else if (param->add_char.char_uuid.len == ESP_UUID_LEN_128 &&
+            memcmp(param->add_char.char_uuid.uuid.uuid128, stream_length_ms_chr_uuid, ESP_UUID_LEN_128) == 0) {
+            // This is STREAM length milliseconds characteristic
+
+            stream_length_ms_char_handle = param->add_char.attr_handle;
+            ESP_LOGI(GATTS_TAG, "STREAM length milliseconds char handle=%u", stream_length_ms_char_handle);
+
+            // Add uuid for notifications
+            esp_bt_uuid_t uuid = {
+                .len = ESP_UUID_LEN_16,
+                .uuid = { .uuid16 = ESP_GATT_UUID_CHAR_DESCRIPTION },
+            };
+
+            esp_err_t dret = esp_ble_gatts_add_char_descr(
+                gl_profile_tab[AUTO_IO_PROFILE_APP_ID].service_handle,
+                &uuid,
+                ESP_GATT_PERM_WRITE,
+                NULL,
+                NULL
+            );
+            if (dret) {
+                ESP_LOGE(GATTS_TAG, "add STREAM length milliseconds failed, error code = %x", dret);
+            }
         } else {
             // LED characteristic handle
             gl_profile_tab[AUTO_IO_PROFILE_APP_ID].char_handle = param->add_char.attr_handle;
             ESP_LOGI(GATTS_TAG, "LED char handle=%u", gl_profile_tab[AUTO_IO_PROFILE_APP_ID].char_handle);
         }
-    break;
+        break;
 
-    case ESP_GATTS_ADD_CHAR_DESCR_EVT:
-        ESP_LOGI(GATTS_TAG, "AUTO_IO: add descr, status %d, handle %d",
+    case ESP_GATTS_ADD_CHAR_DESCR_EVT: {
+        ESP_LOGI(GATTS_TAG, "AUTO_IO: add descr, status %d, descr_handle %d",
                 param->add_char_descr.status, param->add_char_descr.attr_handle);
 
-        // This example only adds one descriptor (STREAM CCCD)
-        stream_cccd_handle = param->add_char_descr.attr_handle;
-        ESP_LOGI(GATTS_TAG, "STREAM CCCD handle=%u", stream_cccd_handle);
-    break;
+        if (param->add_char_descr.status != ESP_GATT_OK) {
+            ESP_LOGE(GATTS_TAG, "ADD_CHAR_DESCR failed, status=%d", param->add_char_descr.status);
+            break;
+        }
+
+        const uint16_t descr_handle = param->add_char_descr.attr_handle;
+        const uint16_t char_handle  = param->add_char_descr.char_handle;
+
+        // riconosci solo descrittori 16-bit (CCCD e User Description lo sono)
+        uint16_t descr_uuid16 = 0;
+        if (param->add_char_descr.descr_uuid.len == ESP_UUID_LEN_16) {
+            descr_uuid16 = param->add_char_descr.descr_uuid.uuid.uuid16;
+        }
+
+        // 1) STREAM: salva SOLO la CCCD (0x2902)
+        if (char_handle == stream_char_handle && descr_uuid16 == ESP_GATT_UUID_CHAR_CLIENT_CONFIG) {
+            stream_cccd_handle = descr_handle;
+            ESP_LOGI(GATTS_TAG, "STREAM CCCD handle = %u (0x%04X)", stream_cccd_handle, stream_cccd_handle);
+            break;
+        }
+
+        // 2) LENGTH: qui NON vuoi CCCD. Se aggiungi 0x2901 (User Description), log e basta.
+        if (char_handle == stream_length_ms_char_handle) {
+            ESP_LOGI(GATTS_TAG, "LENGTH descr added uuid16=0x%04X, handle=%u (0x%04X)",
+                    descr_uuid16, descr_handle, descr_handle);
+            break;
+        }
+
+        // 3) altri descrittori: non toccare stream_cccd_handle
+        ESP_LOGI(GATTS_TAG, "Descr added for char_handle=%u (0x%04X), uuid16=0x%04X, descr_handle=%u (0x%04X)",
+                char_handle, char_handle, descr_uuid16, descr_handle, descr_handle);
+        break;
+    }
+
 
     case ESP_GATTS_READ_EVT:
         ESP_LOGI(GATTS_TAG, "Characteristic read");
@@ -497,6 +582,25 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
                     vTaskDelete(stream_task_handle);
                     stream_task_handle = NULL;
                 }
+            }
+        }
+
+        // STREAM length milliseconds characteristic write
+        if (!param->write.is_prep &&
+            param->write.handle == stream_length_ms_char_handle &&
+            param->write.len == 4) {
+            
+            uint32_t l_ms;
+            memcpy(&l_ms, param->write.value, param->write.len);
+
+            if(l_ms == 0)
+            {
+                ESP_LOGW(GATTS_TAG, "STREAM length milliseconds %u, not valid", l_ms);
+            }
+            else
+            {
+                lenght_ms = l_ms;
+                ESP_LOGI(GATTS_TAG, "STREAM length milliseconds %u", l_ms);
             }
         }
 
@@ -544,7 +648,7 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
         
         stream_gatts_if = gatts_if;
         stream_conn_id = param->connect.conn_id;
-		ble_rf_tune_on_connect(param->connect.remote_bda);
+        ble_rf_tune_on_connect(param->connect.remote_bda);
         
         esp_ble_gap_update_conn_params(&conn_params);
         break;
@@ -563,7 +667,7 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
         }
 
         esp_ble_gap_start_advertising(&adv_params);
-    break;
+        break;
 
     case ESP_GATTS_CONF_EVT:
         ESP_LOGI(GATTS_TAG, "Confirm receive, status %d, attr_handle %d", param->conf.status, param->conf.handle);

@@ -233,40 +233,111 @@ static void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp
 
 static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
 {
-    switch (event) {
-    case ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT:
-        esp_ble_gap_start_scanning(0);
-        break;
-
-    case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT:
-        ESP_LOGI(TAG, "Scan start status=%d", param->scan_start_cmpl.status);
-        break;
-
-    case ESP_GAP_BLE_SCAN_RESULT_EVT: {
-        switch (param->scan_rst.search_evt) {
-        case ESP_GAP_SEARCH_INQ_RES_EVT:
-            if (adv_name_matches(param->scan_rst.ble_adv, REMOTE_DEVICE_NAME)) {
-                ESP_LOGI(TAG, "Found '%s' -> connect", REMOTE_DEVICE_NAME);
-                esp_ble_gap_stop_scanning();
-                esp_ble_gattc_open(gl_profile_tab[PROFILE_A_APP_ID].gattc_if,
-                                   param->scan_rst.bda,
-                                   param->scan_rst.ble_addr_type,
-                                   true);
-            }
+    switch (event)
+    {
+        case ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT:
+            esp_ble_gap_start_scanning(0);
             break;
 
-        case ESP_GAP_SEARCH_INQ_CMPL_EVT:
-            ESP_LOGI(TAG, "Scan complete");
+        case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT:
+            ESP_LOGI(TAG, "Scan start status=%d", param->scan_start_cmpl.status);
+            break;
+
+        case ESP_GAP_BLE_SCAN_RESULT_EVT:
+        {
+            switch (param->scan_rst.search_evt)
+            {
+                case ESP_GAP_SEARCH_INQ_RES_EVT:
+                    if (adv_name_matches(param->scan_rst.ble_adv, REMOTE_DEVICE_NAME)) {
+                        ESP_LOGI(TAG, "Found '%s' -> connect", REMOTE_DEVICE_NAME);
+                        esp_ble_gap_stop_scanning();
+                        esp_ble_gattc_open(gl_profile_tab[PROFILE_A_APP_ID].gattc_if,
+                                        param->scan_rst.bda,
+                                        param->scan_rst.ble_addr_type,
+                                        true);
+                    }
+                    break;
+
+                case ESP_GAP_SEARCH_INQ_CMPL_EVT:
+                    ESP_LOGI(TAG, "Scan complete");
+                    break;
+
+                default:
+                    break;
+            }
+
+            break;
+        }
+
+        case ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT:
+        {
+            esp_ble_gap_cb_param_t *rssi = param;
+
+            if (rssi->read_rssi_cmpl.status == ESP_BT_STATUS_SUCCESS)
+            {
+                ESP_LOGI(TAG,
+                        "RSSI read complete: %d dBm (addr=%02X:%02X:%02X:%02X:%02X:%02X)",
+                        rssi->read_rssi_cmpl.rssi,
+                        rssi->read_rssi_cmpl.remote_addr[0],
+                        rssi->read_rssi_cmpl.remote_addr[1],
+                        rssi->read_rssi_cmpl.remote_addr[2],
+                        rssi->read_rssi_cmpl.remote_addr[3],
+                        rssi->read_rssi_cmpl.remote_addr[4],
+                        rssi->read_rssi_cmpl.remote_addr[5]);
+            }
+            else
+            {
+                ESP_LOGW(TAG,
+                        "RSSI read failed, status=%d",
+                        rssi->read_rssi_cmpl.status);
+            }
+            break;
+        }
+
+        case ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT:
+        {
+            const esp_ble_gap_cb_param_t *u = param;
+            ESP_LOGI(TAG,
+                "CONN_PARAMS status=%d, min_int=%d max_int=%d latency=%d timeout=%d",
+                u->update_conn_params.status,
+                u->update_conn_params.min_int,
+                u->update_conn_params.max_int,
+                u->update_conn_params.latency,
+                u->update_conn_params.timeout
+            );
+
+            // conversioni comode
+            float min_ms = u->update_conn_params.min_int * 1.25f;
+            float max_ms = u->update_conn_params.max_int * 1.25f;
+            float sup_ms = u->update_conn_params.timeout * 10.0f;
+            ESP_LOGI(TAG, " -> interval=[%.2f..%.2f] ms, supervision=%.0f ms",
+                    min_ms, max_ms, sup_ms);
+            break;
+        }
+
+        case ESP_GAP_BLE_READ_PHY_COMPLETE_EVT:
+            ESP_LOGI(TAG, "READ_PHY status=%d, tx_phy=%d rx_phy=%d",
+                    param->read_phy.status,
+                    param->read_phy.tx_phy,
+                    param->read_phy.rx_phy);
+            break;
+
+        case ESP_GAP_BLE_PHY_UPDATE_COMPLETE_EVT:
+            ESP_LOGI(TAG, "PHY_UPDATE status=%d, tx_phy=%d rx_phy=%d",
+                    param->phy_update.status,
+                    param->phy_update.tx_phy,
+                    param->phy_update.rx_phy);
+            break;
+
+        case ESP_GAP_BLE_SET_PKT_LENGTH_COMPLETE_EVT:
+            ESP_LOGI(TAG, "PKT_LEN status=%d, rx_len=%d tx_len=%d",
+                    param->pkt_data_length_cmpl.status,
+                    param->pkt_data_length_cmpl.params.rx_len,
+                    param->pkt_data_length_cmpl.params.tx_len);
             break;
 
         default:
             break;
-        }
-        break;
-    }
-
-    default:
-        break;
     }
 }
 
@@ -300,14 +371,40 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         p->conn_id = param->connect.conn_id;
         memcpy(p->remote_bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
 
+        esp_err_t ret = esp_ble_gap_read_phy(p->remote_bda);
+        if (ret)
+        {
+            ESP_LOGE(TAG, "esp_ble_gap_read_phy failed");
+        }
+
         // MTU request (opzionale)
-        esp_ble_gattc_send_mtu_req(gattc_if, p->conn_id);
+        ret = esp_ble_gattc_send_mtu_req(gattc_if, p->conn_id);
+        if (ret)
+        {
+            ESP_LOGE(TAG, "esp_ble_gattc_send_mtu_req failed");
+        }
+
+        ret = esp_ble_gap_read_rssi(p->remote_bda);
+        if (ret)
+        {
+            ESP_LOGE(TAG, "esp_ble_gap_read_rssi failed");
+        }
+
+        int8_t tx_power = esp_ble_tx_power_get(
+            ESP_BLE_PWR_TYPE_CONN_HDL0 + p->conn_id
+        );
+
+        ESP_LOGI(TAG,
+                "Local TX Power (conn_id=%d): %d dBm",
+                p->conn_id,
+                tx_power);
+
         break;
 
     case ESP_GATTC_CFG_MTU_EVT:
         ESP_LOGI(TAG, "CFG_MTU_EVT mtu=%d", param->cfg_mtu.mtu);
         // avvia discovery dei servizi
-        esp_ble_gattc_search_service(gattc_if, param->cfg_mtu.conn_id, NULL);
+         esp_ble_gattc_search_service(gattc_if, param->cfg_mtu.conn_id, NULL);
         break;
 
     case ESP_GATTC_SEARCH_RES_EVT: {
@@ -431,7 +528,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 
         if(counter_out_of_bound)
         {
-            ESP_LOGI(TAG, "Dataloss percentage %f", dataloss_get_loss_percentage());
+            ESP_LOGI(TAG, "Dataloss percentage %f%", dataloss_get_loss_percentage());
             ESP_LOGI(TAG, "Number of losses %u", dataloss_number_losses());
             ESP_LOGI(TAG, "DISABLE -> disable notify");
             cccd_write(0x0000);

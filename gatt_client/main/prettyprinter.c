@@ -86,3 +86,29 @@ void prettyprinter_print_phy(esp_ble_gap_phy_t phy, char* to_string, uint8_t len
         break;
     }
 }
+
+void prettyprinter_print_phy2(esp_ble_tx_power_phy_t phy, char* to_string, uint8_t len)
+{
+    switch(phy)
+    {
+        case ESP_BLE_CONN_TX_POWER_PHY_1M:
+            snprintf(to_string, len, "1M");
+        break;
+
+        case ESP_BLE_CONN_TX_POWER_PHY_2M:
+            snprintf(to_string, len, "2M");
+        break;
+
+        case ESP_BLE_CONN_TX_POWER_PHY_CODED_S2:
+            snprintf(to_string, len, "Coded-S2");
+        break;
+
+        case ESP_BLE_CONN_TX_POWER_PHY_CODED_S8:
+            snprintf(to_string, len, "Coded-S8");
+        break;
+
+        case ESP_BLE_CONN_TX_POWER_PHY_NONE:
+            snprintf(to_string, len, "None");
+        break;        
+    }
+}

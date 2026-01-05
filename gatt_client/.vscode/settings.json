@@ -1,8 +1,8 @@
 {
   "C_Cpp.intelliSenseEngine": "default",
-  "idf.espIdfPathWin": "C:\\Users\\User\\esp\\v5.5.1\\esp-idf",
-  "idf.toolsPathWin": "C:\\Users\\User\\.espressif",
-  "idf.pythonInstallPath": "C:\\Users\\User\\.espressif\\tools\\idf-python\\3.11.2\\python.exe",
+  "idf.espIdfPathWin": "C:/Espressif/frameworks/esp-idf-v5.5.2/",
+  "idf.toolsPathWin": "C:\\Espressif",
+  "idf.pythonInstallPath": "C:\\Espressif\\tools\\idf-python\\3.11.2\\python.exe",
   "idf.portWin": "COM12",
   "idf.openOcdConfigs": [
     "board/esp32c6-builtin.cfg"

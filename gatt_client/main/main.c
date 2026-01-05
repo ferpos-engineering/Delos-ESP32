@@ -344,6 +344,43 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
                     param->pkt_data_length_cmpl.params.tx_len);
             break;
 
+        case ESP_GAP_BLE_READ_REMOTE_TRANS_PWR_LEVEL_EVT:
+        {
+            ESP_LOGI(TAG, "READ_REMOTE_TRANS_PWR_LEVEL complete: status=%d",
+                    param->read_remote_trans_pwr_level_cmpl.status);
+            break;
+        }
+
+        case ESP_GAP_BLE_TRANS_PWR_RPTING_EVT:
+        {
+            const int8_t pwr = param->trans_power_report_evt.tx_power_level;
+
+            char phy[10];
+            prettyprinter_print_phy2(param->trans_power_report_evt.phy, phy, sizeof(phy));
+
+            // Nota: 0x7E e 0x7F sono valori "speciali" (not managing / not available)
+            if ((uint8_t)pwr == 0x7E) {
+                ESP_LOGW(TAG, "Remote TX POWER report: remote not managing power on this PHY (conn=0x%04X phy=%s reason=%u)",
+                        param->trans_power_report_evt.conn_handle,
+                        phy,
+                        param->trans_power_report_evt.reason);
+            } else if ((uint8_t)pwr == 0x7F) {
+                ESP_LOGW(TAG, "Remote TX POWER report: power not available (conn=0x%04X phy=%s reason=%u)",
+                        param->trans_power_report_evt.conn_handle,
+                        phy,
+                        param->trans_power_report_evt.reason);
+            } else {
+                ESP_LOGI(TAG, "Remote TX POWER report: %d dBm (conn=0x%04X phy=%s reason=%u delta=%d flag=0x%02X)",
+                        pwr,
+                        param->trans_power_report_evt.conn_handle,
+                        phy,
+                        param->trans_power_report_evt.reason,
+                        param->trans_power_report_evt.delta,
+                        param->trans_power_report_evt.tx_power_level_flag);
+            }
+            break;
+        }
+
         default:
             break;
     }
@@ -402,7 +439,14 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
             ESP_BLE_PWR_TYPE_CONN_HDL0 + p->conn_id
         );
 
-        ESP_LOGI(TAG, "TX Power (conn_id=%d): %d dBm", p->conn_id, prettyprinter_get_tx_power_dbm(tx_power));
+        ESP_LOGI(TAG, "Local TX Power (conn_id=%d): %d dBm", p->conn_id, prettyprinter_get_tx_power_dbm(tx_power));
+
+        ret = esp_ble_gap_read_remote_transmit_power_level(p->conn_id, ESP_BLE_CONN_TX_POWER_PHY_1M);
+        if (ret)
+        {
+            ESP_LOGE(TAG, "esp_ble_gap_read_remote_transmit_power_level failed");
+        }
+
         break;
 
     case ESP_GATTC_CFG_MTU_EVT:

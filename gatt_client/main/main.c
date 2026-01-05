@@ -34,6 +34,8 @@
 
 #include "driver/gpio.h"
 
+#include "dataloss.h"
+
 #ifndef INVALID_HANDLE
 #define INVALID_HANDLE 0
 #endif
@@ -135,28 +137,7 @@ static void buttons_init(void)
     ESP_ERROR_CHECK(gpio_config(&io));
 }
 
-#define NUM_DATA 16
-#define countof(x) x * sizeof(uint8_t)
 
-uint8_t notify_value[NUM_DATA] = { 0 };
-uint8_t notify_next_value[NUM_DATA] = { 0 };
-
-void calculate_notify_next_value()
-{
-    uint32_t counter;
-    memcpy(&counter, notify_value, sizeof(counter));
-    counter++;
-    memcpy(notify_next_value, &counter, sizeof(counter));
-
-    for (int i = 4; i < NUM_DATA; i++) {
-        notify_next_value[i] = (uint8_t)(counter + i);
-    }
-}
-
-void reset_notify_next_value()
-{
-    memset(notify_next_value, 0, countof(NUM_DATA));
-}
 
 static esp_err_t cccd_write(uint16_t value_le)
 {
@@ -186,7 +167,7 @@ static esp_err_t cccd_write(uint16_t value_le)
         return err;
     }
     
-    reset_notify_next_value();
+    dataloss_reset();
     ESP_LOGI(TAG, "CCCD write requested: 0x%04x", value_le);
     return ESP_OK;
 }
@@ -445,24 +426,29 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 
     case ESP_GATTC_NOTIFY_EVT:
 
-        memcpy(notify_value, param->notify.value, param->notify.value_len);
-        
-        if(notify_next_value[0] == 0 && notify_next_value[param->notify.value_len - 1] == 0)
-        {
-            ESP_LOGI(TAG, "NOTIFY len=%d", param->notify.value_len);
-            memcpy(notify_next_value, notify_value, param->notify.value_len);
-        }
+        bool loss, wrong_data_len, counter_out_of_bound;
+        dataloss_new_sample(param->notify.value, param->notify.value_len, &loss, &wrong_data_len, &counter_out_of_bound);
 
-        if(memcmp(notify_next_value, notify_value, countof(NUM_DATA)) != 0)
+        if(counter_out_of_bound)
         {
-            ESP_LOGI(TAG, "NOTIFY len=%d", param->notify.value_len);
-            ESP_LOGW(TAG, "DATA LOSS!!!");
-            ESP_LOG_BUFFER_HEX(TAG, notify_value, countof(NUM_DATA));
-            ESP_LOG_BUFFER_HEX(TAG, notify_next_value, countof(NUM_DATA));
+            ESP_LOGI(TAG, "Dataloss percentage %f", dataloss_get_loss_percentage());
+            ESP_LOGI(TAG, "Number of losses %u", dataloss_number_losses());
+            ESP_LOGI(TAG, "DISABLE -> disable notify");
+            cccd_write(0x0000);
         }
-        
-        calculate_notify_next_value();
+        else
+        {
+            if(loss)
+            {
+                int num_samples_lost = dataloss_get_last_loss_amplitude();
+                ESP_LOGW(TAG, "DATA LOSS, lost %d samples", num_samples_lost);
+            }
 
+            if(wrong_data_len)
+            {
+                ESP_LOGW(TAG, "DATA LOSS, received only %d bytes", param->notify.value_len);
+            }
+        }
 
         break;
 

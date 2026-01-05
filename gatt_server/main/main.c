@@ -147,7 +147,6 @@ static esp_attr_value_t stream_user_desc_val = {
 };
 
 static uint16_t stream_user_desc_handle = 0;
-static bool stream_user_desc_pending = false;
 
 // String must remain valid for the whole runtime (static)
 static const uint8_t length_user_desc_str[] = "Stream duration (ms)";
@@ -505,22 +504,18 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
                 .uuid = { .uuid16 = ESP_GATT_UUID_CHAR_CLIENT_CONFIG },
             };
 
-            // Add also 0x2901 User Description for STREAM after CCCD is created
-            stream_user_desc_pending = true;
-
             s_pending_descr = PENDING_STREAM_CCCD;
 
             esp_err_t dret = esp_ble_gatts_add_char_descr(
                 gl_profile_tab[AUTO_IO_PROFILE_APP_ID].service_handle,
                 &cccd_uuid,
                 ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-                NULL,
+                &stream_user_desc_val,
                 NULL
             );
             if (dret) {
                 ESP_LOGE(GATTS_TAG, "add STREAM CCCD failed, error code = %x", dret);
                 s_pending_descr = PENDING_NONE;
-                stream_user_desc_pending = false;
             }
         }
         else if (param->add_char.char_uuid.len == ESP_UUID_LEN_128 &&
@@ -559,7 +554,6 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
             ESP_LOGE(GATTS_TAG, "ADD_CHAR_DESCR failed, status=%d", param->add_char_descr.status);
             // reset pending state to avoid poisoning subsequent descriptor adds
             s_pending_descr = PENDING_NONE;
-            stream_user_desc_pending = false;
             break;
         }
 
@@ -571,24 +565,6 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
 
             // If requested, add 0x2901 User Description for STREAM now (after CCCD exists).
             // IMPORTANT: do NOT clear s_pending_descr here; the next DESCR_EVT will belong to PENDING_STREAM_USER_DESC.
-            if (stream_user_desc_pending) {
-                stream_user_desc_pending = false;
-                s_pending_descr = PENDING_STREAM_USER_DESC;
-
-                esp_err_t dret2 = esp_ble_gatts_add_char_descr(
-                    gl_profile_tab[AUTO_IO_PROFILE_APP_ID].service_handle,
-                    &user_desc_uuid,
-                    ESP_GATT_PERM_READ,
-                    &stream_user_desc_val,
-                    NULL
-                );
-                if (dret2) {
-                    ESP_LOGE(GATTS_TAG, "add STREAM UserDesc failed, error code = %x", dret2);
-                    s_pending_descr = PENDING_NONE;
-                }
-                break;
-            }
-
             s_pending_descr = PENDING_NONE;
             break;
 

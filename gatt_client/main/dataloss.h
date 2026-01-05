@@ -2,11 +2,12 @@
 #define DATALOSS_H
 
 /* Includes */
-/* ESP APIs */
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+
+/* ESP APIs */
 
 void dataloss_new_sample(uint8_t* data, uint16_t data_len, bool* loss, bool* wrong_data_len, bool* counter_out_of_bound);
 void dataloss_reset();

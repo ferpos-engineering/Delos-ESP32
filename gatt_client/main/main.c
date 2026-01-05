@@ -35,6 +35,7 @@
 #include "driver/gpio.h"
 
 #include "dataloss.h"
+#include "prettyprinter.h"
 
 #ifndef INVALID_HANDLE
 #define INVALID_HANDLE 0
@@ -316,18 +317,25 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
         }
 
         case ESP_GAP_BLE_READ_PHY_COMPLETE_EVT:
-            ESP_LOGI(TAG, "READ_PHY status=%d, tx_phy=%d rx_phy=%d",
-                    param->read_phy.status,
-                    param->read_phy.tx_phy,
-                    param->read_phy.rx_phy);
+        {
+            char tx[6], rx[6];
+            prettyprinter_print_phy(param->read_phy.tx_phy, tx, sizeof(tx));
+            prettyprinter_print_phy(param->read_phy.rx_phy, rx, sizeof(rx));
+
+            ESP_LOGI(TAG, "READ_PHY status=%d, tx_phy=%s rx_phy=%s",
+                    param->read_phy.status, tx, rx);
             break;
+        }
 
         case ESP_GAP_BLE_PHY_UPDATE_COMPLETE_EVT:
-            ESP_LOGI(TAG, "PHY_UPDATE status=%d, tx_phy=%d rx_phy=%d",
-                    param->phy_update.status,
-                    param->phy_update.tx_phy,
-                    param->phy_update.rx_phy);
+        {
+            char tx[6], rx[6];
+            prettyprinter_print_phy(param->phy_update.tx_phy, tx, sizeof(tx));
+            prettyprinter_print_phy(param->phy_update.rx_phy, rx, sizeof(rx));
+            ESP_LOGI(TAG, "PHY_UPDATE status=%d, tx_phy=%s rx_phy=%s",
+                    param->phy_update.status, tx, rx);
             break;
+        }
 
         case ESP_GAP_BLE_SET_PKT_LENGTH_COMPLETE_EVT:
             ESP_LOGI(TAG, "PKT_LEN status=%d, rx_len=%d tx_len=%d",
@@ -390,15 +398,11 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
             ESP_LOGE(TAG, "esp_ble_gap_read_rssi failed");
         }
 
-        int8_t tx_power = esp_ble_tx_power_get(
+        esp_power_level_t tx_power = esp_ble_tx_power_get(
             ESP_BLE_PWR_TYPE_CONN_HDL0 + p->conn_id
         );
 
-        ESP_LOGI(TAG,
-                "Local TX Power (conn_id=%d): %d dBm",
-                p->conn_id,
-                tx_power);
-
+        ESP_LOGI(TAG, "TX Power (conn_id=%d): %d dBm", p->conn_id, prettyprinter_get_tx_power_dbm(tx_power));
         break;
 
     case ESP_GATTC_CFG_MTU_EVT:

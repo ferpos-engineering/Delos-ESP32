@@ -53,21 +53,6 @@
 #define REMOTE_DEVICE_NAME          "DPPS-DTS"
 #define REMOTE_SERVICE_UUID         0x1815   // AUTO_IO_SVC_UUID nel tuo server
 
-// STREAM characteristic UUID (128-bit) ...0001 (deve combaciare col server)
-static esp_bt_uuid_t remote_filter_char_uuid = {
-    .len = ESP_UUID_LEN_128,
-    .uuid = {.uuid128 = {
-        0x23, 0xd1, 0xbc, 0xea, 0x5f, 0x78, 0x23, 0x15,
-        0xde, 0xef, 0x12, 0x12, 0x25, 0x15, 0x00, 0x01
-    }},
-};
-
-// CCCD UUID 0x2902
-static esp_bt_uuid_t notify_descr_uuid = {
-    .len = ESP_UUID_LEN_16,
-    .uuid = {.uuid16 = ESP_GATT_UUID_CHAR_CLIENT_CONFIG,},
-};
-
 // Buttons (ACTIVE LOW)
 #if CONFIG_IDF_TARGET_ESP32C6
 #define BTN_ENABLE_GPIO             9
@@ -80,7 +65,9 @@ static esp_bt_uuid_t notify_descr_uuid = {
 #define BTN_POLL_MS                 20
 #define BTN_DEBOUNCE_MS             50
 
-static const char *TAG = "BLE_DONGLE";
+#define ESP_PWR_LVL ESP_PWR_LVL_P9
+
+static const char *DEVICE_NAME = "DPPS-DONGLE";
 
 // --------------------- Scan params ---------------------
 
@@ -105,6 +92,21 @@ struct gattc_profile_inst {
     uint16_t char_handle;
     uint16_t cccd_handle;
     esp_bd_addr_t remote_bda;
+};
+
+// STREAM characteristic UUID (128-bit) ...0001 (deve combaciare col server)
+static esp_bt_uuid_t remote_filter_char_uuid = {
+    .len = ESP_UUID_LEN_128,
+    .uuid = {.uuid128 = {
+        0x23, 0xd1, 0xbc, 0xea, 0x5f, 0x78, 0x23, 0x15,
+        0xde, 0xef, 0x12, 0x12, 0x25, 0x15, 0x00, 0x01
+    }},
+};
+
+// CCCD UUID 0x2902
+static esp_bt_uuid_t notify_descr_uuid = {
+    .len = ESP_UUID_LEN_16,
+    .uuid = {.uuid16 = ESP_GATT_UUID_CHAR_CLIENT_CONFIG,},
 };
 
 static struct gattc_profile_inst gl_profile_tab[PROFILE_NUM];
@@ -139,6 +141,45 @@ static notify_stats_t notify_stats = {
 
 // --------------------- Helpers ---------------------
 
+static void ble_rf_tune_before_adv(void)
+{
+    // 1) TX power al massimo per BLE (ADV/SCAN/DEFAULT)
+    // Nota: i livelli disponibili dipendono dal chip/target; in genere P9 è il più alto.
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL);
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV,     ESP_PWR_LVL);
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN,    ESP_PWR_LVL);
+
+
+    // 2) (Opzionale) Preferisci PHY più robusto in connessione.
+    // Se vuoi massimo range/stabilità: S8 coded. Se vuoi compromesso: S2 coded.
+    // Nota: avrà effetto solo se anche il peer supporta LE Coded PHY.
+    esp_ble_gap_set_preferred_default_phy(
+        ESP_BLE_GAP_PHY_CODED_PREF_MASK | ESP_BLE_GAP_PHY_1M_PREF_MASK,
+        ESP_BLE_GAP_PHY_CODED_PREF_MASK | ESP_BLE_GAP_PHY_1M_PREF_MASK
+    );
+}
+
+static void ble_rf_tune_on_connect(esp_bd_addr_t peer_bda)
+{
+    // TX power massima anche sul link di connessione (handle 0)
+    // Se hai più connessioni, userai CONN_HDL1, CONN_HDL2, ...
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL0, ESP_PWR_LVL);
+
+        // all_phys_mask = 0 -> dichiari che stai fornendo preferenze TX/RX
+    // tx/rx mask: preferisci CODED (puoi anche aggiungere 1M come fallback)
+    esp_err_t err = esp_ble_gap_set_preferred_phy(
+        peer_bda,
+        0,
+        ESP_BLE_GAP_PHY_CODED_PREF_MASK | ESP_BLE_GAP_PHY_1M_PREF_MASK,
+        ESP_BLE_GAP_PHY_CODED_PREF_MASK | ESP_BLE_GAP_PHY_1M_PREF_MASK,
+        ESP_BLE_GAP_PHY_OPTIONS_PREF_S8_CODING
+    );
+
+    if (err != ESP_OK) {
+        ESP_LOGW("BLE", "set_preferred_phy failed: %s", esp_err_to_name(err));
+    }
+}
+
 static bool adv_name_matches(const uint8_t *adv_data, const char *name)
 {
     uint8_t len = 0;
@@ -168,7 +209,7 @@ static esp_err_t cccd_write(uint16_t value)
     struct gattc_profile_inst *p = &gl_profile_tab[PROFILE_A_APP_ID];
 
     if (!connect_ok || !service_ok || p->cccd_handle == 0 || p->gattc_if == ESP_GATT_IF_NONE) {
-        ESP_LOGW(TAG, "CCCD write skipped (connect_ok=%d service_ok=%d cccd=0x%04x)",
+        ESP_LOGW(DEVICE_NAME, "CCCD write skipped (connect_ok=%d service_ok=%d cccd=0x%04x)",
                  connect_ok, service_ok, p->cccd_handle);
         return ESP_FAIL;
     }
@@ -187,12 +228,12 @@ static esp_err_t cccd_write(uint16_t value)
     );
 
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "write_char_descr failed: %s", esp_err_to_name(err));
+        ESP_LOGE(DEVICE_NAME, "write_char_descr failed: %s", esp_err_to_name(err));
         return err;
     }
 
     dataloss_reset();
-    ESP_LOGI(TAG, "CCCD write requested: 0x%04x", value);
+    ESP_LOGI(DEVICE_NAME, "CCCD write requested: 0x%04x", value);
     return ESP_OK;
 }
 
@@ -210,7 +251,7 @@ static void button_task(void *arg)
         if (prev_en == 1 && en == 0) {
             vTaskDelay(pdMS_TO_TICKS(BTN_DEBOUNCE_MS));
             if (gpio_get_level(BTN_ENABLE_GPIO) == 0) {
-                ESP_LOGI(TAG, "BTN_ENABLE -> enable notify");
+                ESP_LOGI(DEVICE_NAME, "BTN_ENABLE -> enable notify");
                 cccd_write(0x0001);
             }
         }
@@ -218,7 +259,7 @@ static void button_task(void *arg)
         if (prev_dis == 1 && dis == 0) {
             vTaskDelay(pdMS_TO_TICKS(BTN_DEBOUNCE_MS));
             if (gpio_get_level(BTN_DISABLE_GPIO) == 0) {
-                ESP_LOGI(TAG, "BTN_DISABLE -> disable notify");
+                ESP_LOGI(DEVICE_NAME, "BTN_DISABLE -> disable notify");
                 cccd_write(0x0000);
             }
         }
@@ -241,7 +282,7 @@ static void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp
         if (param->reg.status == ESP_GATT_OK) {
             gl_profile_tab[param->reg.app_id].gattc_if = gattc_if;
         } else {
-            ESP_LOGE(TAG, "REG_EVT failed, status=%d", param->reg.status);
+            ESP_LOGE(DEVICE_NAME, "REG_EVT failed, status=%d", param->reg.status);
             return;
         }
     }
@@ -264,7 +305,7 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
             break;
 
         case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT:
-            ESP_LOGI(TAG, "Scan start status=%d", param->scan_start_cmpl.status);
+            ESP_LOGI(DEVICE_NAME, "Scan start status=%d", param->scan_start_cmpl.status);
             break;
 
         case ESP_GAP_BLE_SCAN_RESULT_EVT:
@@ -273,7 +314,7 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
             {
                 case ESP_GAP_SEARCH_INQ_RES_EVT:
                     if (adv_name_matches(param->scan_rst.ble_adv, REMOTE_DEVICE_NAME)) {
-                        ESP_LOGI(TAG, "Found '%s' -> connect", REMOTE_DEVICE_NAME);
+                        ESP_LOGI(DEVICE_NAME, "Found '%s' -> connect", REMOTE_DEVICE_NAME);
                         esp_ble_gap_stop_scanning();
                         esp_ble_gattc_open(gl_profile_tab[PROFILE_A_APP_ID].gattc_if,
                                         param->scan_rst.bda,
@@ -283,7 +324,7 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
                     break;
 
                 case ESP_GAP_SEARCH_INQ_CMPL_EVT:
-                    ESP_LOGI(TAG, "Scan complete");
+                    ESP_LOGI(DEVICE_NAME, "Scan complete");
                     break;
 
                 default:
@@ -299,7 +340,7 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
 
             if (rssi->read_rssi_cmpl.status == ESP_BT_STATUS_SUCCESS)
             {
-                ESP_LOGI(TAG,
+                ESP_LOGI(DEVICE_NAME,
                         "RSSI read complete: %d dBm (addr=%02X:%02X:%02X:%02X:%02X:%02X)",
                         rssi->read_rssi_cmpl.rssi,
                         rssi->read_rssi_cmpl.remote_addr[0],
@@ -311,7 +352,7 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
             }
             else
             {
-                ESP_LOGW(TAG,
+                ESP_LOGW(DEVICE_NAME,
                         "RSSI read failed, status=%d",
                         rssi->read_rssi_cmpl.status);
             }
@@ -321,7 +362,7 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
         case ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT:
         {
             const esp_ble_gap_cb_param_t *u = param;
-            ESP_LOGI(TAG,
+            ESP_LOGI(DEVICE_NAME,
                 "CONN_PARAMS status=%d, min_int=%d max_int=%d latency=%d timeout=%d",
                 u->update_conn_params.status,
                 u->update_conn_params.min_int,
@@ -334,7 +375,7 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
             float min_ms = u->update_conn_params.min_int * 1.25f;
             float max_ms = u->update_conn_params.max_int * 1.25f;
             float sup_ms = u->update_conn_params.timeout * 10.0f;
-            ESP_LOGI(TAG, " -> interval=[%.2f..%.2f] ms, supervision=%.0f ms",
+            ESP_LOGI(DEVICE_NAME, " -> interval=[%.2f..%.2f] ms, supervision=%.0f ms",
                     min_ms, max_ms, sup_ms);
             break;
         }
@@ -345,7 +386,7 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
             prettyprinter_print_phy(param->read_phy.tx_phy, tx, sizeof(tx));
             prettyprinter_print_phy(param->read_phy.rx_phy, rx, sizeof(rx));
 
-            ESP_LOGI(TAG, "READ_PHY status=%d, tx_phy=%s rx_phy=%s",
+            ESP_LOGI(DEVICE_NAME, "READ_PHY status=%d, tx_phy=%s rx_phy=%s",
                     param->read_phy.status, tx, rx);
             break;
         }
@@ -355,13 +396,13 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
             char tx[6], rx[6];
             prettyprinter_print_phy(param->phy_update.tx_phy, tx, sizeof(tx));
             prettyprinter_print_phy(param->phy_update.rx_phy, rx, sizeof(rx));
-            ESP_LOGI(TAG, "PHY_UPDATE status=%d, tx_phy=%s rx_phy=%s",
+            ESP_LOGI(DEVICE_NAME, "PHY_UPDATE status=%d, tx_phy=%s rx_phy=%s",
                     param->phy_update.status, tx, rx);
             break;
         }
 
         case ESP_GAP_BLE_SET_PKT_LENGTH_COMPLETE_EVT:
-            ESP_LOGI(TAG, "PKT_LEN status=%d, rx_len=%d tx_len=%d",
+            ESP_LOGI(DEVICE_NAME, "PKT_LEN status=%d, rx_len=%d tx_len=%d",
                     param->pkt_data_length_cmpl.status,
                     param->pkt_data_length_cmpl.params.rx_len,
                     param->pkt_data_length_cmpl.params.tx_len);
@@ -369,7 +410,7 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
 
         case ESP_GAP_BLE_READ_REMOTE_TRANS_PWR_LEVEL_EVT:
         {
-            ESP_LOGI(TAG, "READ_REMOTE_TRANS_PWR_LEVEL complete: status=%d",
+            ESP_LOGI(DEVICE_NAME, "READ_REMOTE_TRANS_PWR_LEVEL complete: status=%d",
                     param->read_remote_trans_pwr_level_cmpl.status);
             break;
         }
@@ -383,17 +424,17 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
 
             // Nota: 0x7E e 0x7F sono valori "speciali" (not managing / not available)
             if ((uint8_t)pwr == 0x7E) {
-                ESP_LOGW(TAG, "Remote TX POWER report: remote not managing power on this PHY (conn=0x%04X phy=%s reason=%u)",
+                ESP_LOGW(DEVICE_NAME, "Remote TX POWER report: remote not managing power on this PHY (conn=0x%04X phy=%s reason=%u)",
                         param->trans_power_report_evt.conn_handle,
                         phy,
                         param->trans_power_report_evt.reason);
             } else if ((uint8_t)pwr == 0x7F) {
-                ESP_LOGW(TAG, "Remote TX POWER report: power not available (conn=0x%04X phy=%s reason=%u)",
+                ESP_LOGW(DEVICE_NAME, "Remote TX POWER report: power not available (conn=0x%04X phy=%s reason=%u)",
                         param->trans_power_report_evt.conn_handle,
                         phy,
                         param->trans_power_report_evt.reason);
             } else {
-                ESP_LOGI(TAG, "Remote TX POWER report: %d dBm (conn=0x%04X phy=%s reason=%u delta=%d flag=0x%02X)",
+                ESP_LOGI(DEVICE_NAME, "Remote TX POWER report: %d dBm (conn=0x%04X phy=%s reason=%u delta=%d flag=0x%02X)",
                         pwr,
                         param->trans_power_report_evt.conn_handle,
                         phy,
@@ -415,67 +456,69 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 
     switch (event) {
     case ESP_GATTC_REG_EVT: {
-        ESP_LOGI(TAG, "REG_EVT ok, set scan params");
+        ESP_LOGI(DEVICE_NAME, "REG_EVT ok, set scan params");
         esp_err_t err = esp_ble_gap_set_scan_params(&ble_scan_params);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "set_scan_params failed: %s", esp_err_to_name(err));
+            ESP_LOGE(DEVICE_NAME, "set_scan_params failed: %s", esp_err_to_name(err));
         }
         break;
     }
 
     case ESP_GATTC_OPEN_EVT:
         if (param->open.status != ESP_GATT_OK) {
-            ESP_LOGE(TAG, "OPEN_EVT failed, status=%d", param->open.status);
+            ESP_LOGE(DEVICE_NAME, "OPEN_EVT failed, status=%d", param->open.status);
             connect_ok = false;
             esp_ble_gap_start_scanning(0);
             break;
         }
-        ESP_LOGI(TAG, "OPEN_EVT ok");
+        ESP_LOGI(DEVICE_NAME, "OPEN_EVT ok");
         break;
 
     case ESP_GATTC_CONNECT_EVT:
-        ESP_LOGI(TAG, "CONNECT_EVT conn_id=%d", param->connect.conn_id);
+        ESP_LOGI(DEVICE_NAME, "CONNECT_EVT conn_id=%d", param->connect.conn_id);
         connect_ok = true;
         p->conn_id = param->connect.conn_id;
         memcpy(p->remote_bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
 
+        ble_rf_tune_on_connect(param->connect.remote_bda);
+
         esp_err_t ret = esp_ble_gap_read_phy(p->remote_bda);
         if (ret)
         {
-            ESP_LOGE(TAG, "esp_ble_gap_read_phy failed");
+            ESP_LOGE(DEVICE_NAME, "esp_ble_gap_read_phy failed");
         }
 
         // MTU request (opzionale)
         ret = esp_ble_gattc_send_mtu_req(gattc_if, p->conn_id);
         if (ret)
         {
-            ESP_LOGE(TAG, "esp_ble_gattc_send_mtu_req failed");
+            ESP_LOGE(DEVICE_NAME, "esp_ble_gattc_send_mtu_req failed");
         }
 
         ret = esp_ble_gap_read_rssi(p->remote_bda);
         if (ret)
         {
-            ESP_LOGE(TAG, "esp_ble_gap_read_rssi failed");
+            ESP_LOGE(DEVICE_NAME, "esp_ble_gap_read_rssi failed");
         }
 
         esp_power_level_t tx_power = esp_ble_tx_power_get(
             ESP_BLE_PWR_TYPE_CONN_HDL0 + p->conn_id
         );
 
-        ESP_LOGI(TAG, "Local TX Power (conn_id=%d): %d dBm",
+        ESP_LOGI(DEVICE_NAME, "Local TX Power (conn_id=%d): %d dBm",
                  p->conn_id,
                  prettyprinter_get_tx_power_dbm(tx_power));
 
         ret = esp_ble_gap_read_remote_transmit_power_level(p->conn_id, ESP_BLE_CONN_TX_POWER_PHY_1M);
         if (ret)
         {
-            ESP_LOGE(TAG, "esp_ble_gap_read_remote_transmit_power_level failed");
+            ESP_LOGE(DEVICE_NAME, "esp_ble_gap_read_remote_transmit_power_level failed");
         }
 
         break;
 
     case ESP_GATTC_CFG_MTU_EVT:
-        ESP_LOGI(TAG, "CFG_MTU_EVT mtu=%d", param->cfg_mtu.mtu);
+        ESP_LOGI(DEVICE_NAME, "CFG_MTU_EVT mtu=%d", param->cfg_mtu.mtu);
         // avvia discovery dei servizi
         esp_ble_gattc_search_service(gattc_if, param->cfg_mtu.conn_id, NULL);
         break;
@@ -487,7 +530,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         if (srvc_id->uuid.len == ESP_UUID_LEN_16 &&
             srvc_id->uuid.uuid.uuid16 == REMOTE_SERVICE_UUID) {
 
-            ESP_LOGI(TAG, "Found service 0x%04x", REMOTE_SERVICE_UUID);
+            ESP_LOGI(DEVICE_NAME, "Found service 0x%04x", REMOTE_SERVICE_UUID);
             service_ok = true;
             p->service_start_handle = param->search_res.start_handle;
             p->service_end_handle   = param->search_res.end_handle;
@@ -497,7 +540,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 
     case ESP_GATTC_SEARCH_CMPL_EVT:
         if (!service_ok) {
-            ESP_LOGW(TAG, "Service 0x%04x not found -> close", REMOTE_SERVICE_UUID);
+            ESP_LOGW(DEVICE_NAME, "Service 0x%04x not found -> close", REMOTE_SERVICE_UUID);
             esp_ble_gattc_close(gattc_if, p->conn_id);
             break;
         }
@@ -513,13 +556,13 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
                                          &count);
 
             if (count == 0) {
-                ESP_LOGE(TAG, "No characteristics found in service");
+                ESP_LOGE(DEVICE_NAME, "No characteristics found in service");
                 break;
             }
 
             char_elem_result = (esp_gattc_char_elem_t *)malloc(sizeof(esp_gattc_char_elem_t) * count);
             if (!char_elem_result) {
-                ESP_LOGE(TAG, "malloc char_elem_result failed");
+                ESP_LOGE(DEVICE_NAME, "malloc char_elem_result failed");
                 break;
             }
 
@@ -532,10 +575,10 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 
             if (count > 0) {
                 p->char_handle = char_elem_result[0].char_handle;
-                ESP_LOGI(TAG, "STREAM char handle=0x%04x -> register notify", p->char_handle);
+                ESP_LOGI(DEVICE_NAME, "STREAM char handle=0x%04x -> register notify", p->char_handle);
                 esp_ble_gattc_register_for_notify(gattc_if, p->remote_bda, p->char_handle);
             } else {
-                ESP_LOGE(TAG, "STREAM characteristic not found");
+                ESP_LOGE(DEVICE_NAME, "STREAM characteristic not found");
             }
 
             free(char_elem_result);
@@ -545,7 +588,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 
     case ESP_GATTC_REG_FOR_NOTIFY_EVT: {
         if (param->reg_for_notify.status != ESP_GATT_OK) {
-            ESP_LOGE(TAG, "REG_FOR_NOTIFY failed, status=%d", param->reg_for_notify.status);
+            ESP_LOGE(DEVICE_NAME, "REG_FOR_NOTIFY failed, status=%d", param->reg_for_notify.status);
             break;
         }
 
@@ -559,13 +602,13 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
                                      &count);
 
         if (count == 0) {
-            ESP_LOGE(TAG, "No descriptors found for STREAM char");
+            ESP_LOGE(DEVICE_NAME, "No descriptors found for STREAM char");
             break;
         }
 
         descr_elem_result = (esp_gattc_descr_elem_t *)malloc(sizeof(esp_gattc_descr_elem_t) * count);
         if (!descr_elem_result) {
-            ESP_LOGE(TAG, "malloc descr_elem_result failed");
+            ESP_LOGE(DEVICE_NAME, "malloc descr_elem_result failed");
             break;
         }
 
@@ -578,9 +621,9 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 
         if (count > 0) {
             p->cccd_handle = descr_elem_result[0].handle; // in IDF 5.5.x è "handle"
-            ESP_LOGI(TAG, "CCCD handle=0x%04x (usa i pulsanti)", p->cccd_handle);
+            ESP_LOGI(DEVICE_NAME, "CCCD handle=0x%04x (usa i pulsanti)", p->cccd_handle);
         } else {
-            ESP_LOGE(TAG, "CCCD (0x2902) not found");
+            ESP_LOGE(DEVICE_NAME, "CCCD (0x2902) not found");
         }
 
         free(descr_elem_result);
@@ -590,10 +633,10 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 
     case ESP_GATTC_WRITE_DESCR_EVT:
         if (param->write.status != ESP_GATT_OK) {
-            ESP_LOGE(TAG, "WRITE_DESCR_EVT failed, status=0x%x", param->write.status);
+            ESP_LOGE(DEVICE_NAME, "WRITE_DESCR_EVT failed, status=0x%x", param->write.status);
             break;
         }
-        ESP_LOGI(TAG, "WRITE_DESCR_EVT ok (handle=0x%04x)", param->write.handle);
+        ESP_LOGI(DEVICE_NAME, "WRITE_DESCR_EVT ok (handle=0x%04x)", param->write.handle);
         break;
 
     case ESP_GATTC_NOTIFY_EVT: {
@@ -622,7 +665,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
                 int64_t avg_us = notify_stats.sum_us / (int64_t)notify_stats.count;
                 int64_t jitter_us = notify_stats.max_us - notify_stats.min_us;
 
-                ESP_LOGI(TAG,
+                ESP_LOGI(DEVICE_NAME,
                     "NOTIFY stats (1s): cnt=%" PRIu32
                     " avg=%" PRId64 " us (%.2f ms)"
                     " min=%" PRId64 " us"
@@ -650,9 +693,9 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 
         if (counter_out_of_bound)
         {
-            ESP_LOGI(TAG, "Dataloss percentage %f%%", dataloss_get_loss_percentage());
-            ESP_LOGI(TAG, "Number of losses %u", dataloss_number_losses());
-            ESP_LOGI(TAG, "DISABLE -> disable notify");
+            ESP_LOGI(DEVICE_NAME, "Dataloss percentage %f%%", dataloss_get_loss_percentage());
+            ESP_LOGI(DEVICE_NAME, "Number of losses %u", dataloss_number_losses());
+            ESP_LOGI(DEVICE_NAME, "DISABLE -> disable notify");
             cccd_write(0x0000);
         }
         else
@@ -660,12 +703,12 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
             if (loss)
             {
                 int num_samples_lost = dataloss_get_last_loss_amplitude();
-                ESP_LOGW(TAG, "DATA LOSS, lost %d samples", num_samples_lost);
+                ESP_LOGW(DEVICE_NAME, "DATA LOSS, lost %d samples", num_samples_lost);
             }
 
             if (wrong_data_len)
             {
-                ESP_LOGW(TAG, "DATA LOSS, received only %d bytes", param->notify.value_len);
+                ESP_LOGW(DEVICE_NAME, "DATA LOSS, received only %d bytes", param->notify.value_len);
             }
         }
 
@@ -673,7 +716,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
     }
 
     case ESP_GATTC_DISCONNECT_EVT:
-        ESP_LOGI(TAG, "DISCONNECT reason=0x%02x", param->disconnect.reason);
+        ESP_LOGI(DEVICE_NAME, "DISCONNECT reason=0x%02x", param->disconnect.reason);
         connect_ok = false;
         service_ok = false;
         p->service_start_handle = 0;
@@ -718,48 +761,52 @@ void app_main(void)
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     ret = esp_bt_controller_init(&bt_cfg);
     if (ret) {
-        ESP_LOGE(TAG, "bt_controller_init failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(DEVICE_NAME, "bt_controller_init failed: %s", esp_err_to_name(ret));
         return;
     }
 
     ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
     if (ret) {
-        ESP_LOGE(TAG, "bt_controller_enable failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(DEVICE_NAME, "bt_controller_enable failed: %s", esp_err_to_name(ret));
         return;
     }
 
     ret = esp_bluedroid_init();
     if (ret) {
-        ESP_LOGE(TAG, "bluedroid_init failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(DEVICE_NAME, "bluedroid_init failed: %s", esp_err_to_name(ret));
         return;
     }
 
     ret = esp_bluedroid_enable();
     if (ret) {
-        ESP_LOGE(TAG, "bluedroid_enable failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(DEVICE_NAME, "bluedroid_enable failed: %s", esp_err_to_name(ret));
         return;
     }
 
+    ble_rf_tune_before_adv();
+
+    ESP_ERROR_CHECK(esp_ble_gap_set_device_name(DEVICE_NAME));
+
     ret = esp_ble_gatt_set_local_mtu(MTU);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "set_local_mtu(%d) failed: %s", MTU, esp_err_to_name(ret));
+        ESP_LOGE(DEVICE_NAME, "set_local_mtu(%d) failed: %s", MTU, esp_err_to_name(ret));
     }
 
     ret = esp_ble_gap_register_callback(esp_gap_cb);
     if (ret) {
-        ESP_LOGE(TAG, "gap_register_callback failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(DEVICE_NAME, "gap_register_callback failed: %s", esp_err_to_name(ret));
         return;
     }
 
     ret = esp_ble_gattc_register_callback(esp_gattc_cb);
     if (ret) {
-        ESP_LOGE(TAG, "gattc_register_callback failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(DEVICE_NAME, "gattc_register_callback failed: %s", esp_err_to_name(ret));
         return;
     }
 
     ret = esp_ble_gattc_app_register(PROFILE_A_APP_ID);
     if (ret) {
-        ESP_LOGE(TAG, "gattc_app_register failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(DEVICE_NAME, "gattc_app_register failed: %s", esp_err_to_name(ret));
         return;
     }
 

@@ -1,10 +1,11 @@
 /*
- * gattc_demo_fixed.c - ESP-IDF 5.5.1 (Bluedroid) GATT Client
+ * main.c - ESP-IDF 5.5.1 (Bluedroid) GATT Client
  *
  * Modifiche richieste:
  *  - usa 2 pulsanti GPIO per abilitare/disabilitare NOTIFY scrivendo 0x0001/0x0000 nella CCCD (0x2902)
  *  - cerca un server con nome REMOTE_DEVICE_NAME
  *  - trova servizio 16-bit REMOTE_SERVICE_UUID (AUTO_IO = 0x1815) e characteristic STREAM (UUID 128-bit ...0001)
+ *  - Versione “PRO”: statistiche NOTIFY (min/max/avg/jitter) stampate 1 volta al secondo
  *
  * NOTE:
  *  - Aggiorna BTN_ENABLE_GPIO / BTN_DISABLE_GPIO in base alla tua board.
@@ -15,12 +16,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <limits.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "esp_system.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 
 #include "esp_bt.h"
@@ -112,6 +115,28 @@ static bool service_ok    = false;
 static esp_gattc_char_elem_t  *char_elem_result  = NULL;
 static esp_gattc_descr_elem_t *descr_elem_result = NULL;
 
+// --------------------- NOTIFY stats (PRO) ---------------------
+
+typedef struct {
+    int64_t last_us;
+
+    uint32_t count;
+    int64_t sum_us;
+    int64_t min_us;
+    int64_t max_us;
+
+    int64_t window_start_us;
+} notify_stats_t;
+
+static notify_stats_t notify_stats = {
+    .last_us = -1,
+    .count = 0,
+    .sum_us = 0,
+    .min_us = INT64_MAX,
+    .max_us = 0,
+    .window_start_us = 0,
+};
+
 // --------------------- Helpers ---------------------
 
 static bool adv_name_matches(const uint8_t *adv_data, const char *name)
@@ -138,9 +163,7 @@ static void buttons_init(void)
     ESP_ERROR_CHECK(gpio_config(&io));
 }
 
-
-
-static esp_err_t cccd_write(uint16_t value_le)
+static esp_err_t cccd_write(uint16_t value)
 {
     struct gattc_profile_inst *p = &gl_profile_tab[PROFILE_A_APP_ID];
 
@@ -150,15 +173,15 @@ static esp_err_t cccd_write(uint16_t value_le)
         return ESP_FAIL;
     }
 
-    // CCCD è 2 byte LE
-    uint16_t v = value_le;
+    // CCCD è 2 byte little-endian
+    uint8_t cccd[2] = { (uint8_t)(value & 0xFF), (uint8_t)((value >> 8) & 0xFF) };
 
     esp_err_t err = esp_ble_gattc_write_char_descr(
         p->gattc_if,
         p->conn_id,
         p->cccd_handle,
-        sizeof(v),
-        (uint8_t *)&v,
+        sizeof(cccd),
+        cccd,
         ESP_GATT_WRITE_TYPE_RSP,
         ESP_GATT_AUTH_REQ_NONE
     );
@@ -167,9 +190,9 @@ static esp_err_t cccd_write(uint16_t value_le)
         ESP_LOGE(TAG, "write_char_descr failed: %s", esp_err_to_name(err));
         return err;
     }
-    
+
     dataloss_reset();
-    ESP_LOGI(TAG, "CCCD write requested: 0x%04x", value_le);
+    ESP_LOGI(TAG, "CCCD write requested: 0x%04x", value);
     return ESP_OK;
 }
 
@@ -439,7 +462,9 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
             ESP_BLE_PWR_TYPE_CONN_HDL0 + p->conn_id
         );
 
-        ESP_LOGI(TAG, "Local TX Power (conn_id=%d): %d dBm", p->conn_id, prettyprinter_get_tx_power_dbm(tx_power));
+        ESP_LOGI(TAG, "Local TX Power (conn_id=%d): %d dBm",
+                 p->conn_id,
+                 prettyprinter_get_tx_power_dbm(tx_power));
 
         ret = esp_ble_gap_read_remote_transmit_power_level(p->conn_id, ESP_BLE_CONN_TX_POWER_PHY_1M);
         if (ret)
@@ -452,7 +477,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
     case ESP_GATTC_CFG_MTU_EVT:
         ESP_LOGI(TAG, "CFG_MTU_EVT mtu=%d", param->cfg_mtu.mtu);
         // avvia discovery dei servizi
-         esp_ble_gattc_search_service(gattc_if, param->cfg_mtu.conn_id, NULL);
+        esp_ble_gattc_search_service(gattc_if, param->cfg_mtu.conn_id, NULL);
         break;
 
     case ESP_GATTC_SEARCH_RES_EVT: {
@@ -478,42 +503,44 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         }
 
         // Discover characteristic STREAM by UUID
-        uint16_t count = 0;
-        esp_ble_gattc_get_attr_count(gattc_if, p->conn_id,
-                                     ESP_GATT_DB_CHARACTERISTIC,
-                                     p->service_start_handle,
-                                     p->service_end_handle,
-                                     INVALID_HANDLE,
-                                     &count);
+        {
+            uint16_t count = 0;
+            esp_ble_gattc_get_attr_count(gattc_if, p->conn_id,
+                                         ESP_GATT_DB_CHARACTERISTIC,
+                                         p->service_start_handle,
+                                         p->service_end_handle,
+                                         INVALID_HANDLE,
+                                         &count);
 
-        if (count == 0) {
-            ESP_LOGE(TAG, "No characteristics found in service");
-            break;
+            if (count == 0) {
+                ESP_LOGE(TAG, "No characteristics found in service");
+                break;
+            }
+
+            char_elem_result = (esp_gattc_char_elem_t *)malloc(sizeof(esp_gattc_char_elem_t) * count);
+            if (!char_elem_result) {
+                ESP_LOGE(TAG, "malloc char_elem_result failed");
+                break;
+            }
+
+            esp_ble_gattc_get_char_by_uuid(gattc_if, p->conn_id,
+                                           p->service_start_handle,
+                                           p->service_end_handle,
+                                           remote_filter_char_uuid,
+                                           char_elem_result,
+                                           &count);
+
+            if (count > 0) {
+                p->char_handle = char_elem_result[0].char_handle;
+                ESP_LOGI(TAG, "STREAM char handle=0x%04x -> register notify", p->char_handle);
+                esp_ble_gattc_register_for_notify(gattc_if, p->remote_bda, p->char_handle);
+            } else {
+                ESP_LOGE(TAG, "STREAM characteristic not found");
+            }
+
+            free(char_elem_result);
+            char_elem_result = NULL;
         }
-
-        char_elem_result = (esp_gattc_char_elem_t *)malloc(sizeof(esp_gattc_char_elem_t) * count);
-        if (!char_elem_result) {
-            ESP_LOGE(TAG, "malloc char_elem_result failed");
-            break;
-        }
-
-        esp_ble_gattc_get_char_by_uuid(gattc_if, p->conn_id,
-                                       p->service_start_handle,
-                                       p->service_end_handle,
-                                       remote_filter_char_uuid,
-                                       char_elem_result,
-                                       &count);
-
-        if (count > 0) {
-            p->char_handle = char_elem_result[0].char_handle;
-            ESP_LOGI(TAG, "STREAM char handle=0x%04x -> register notify", p->char_handle);
-            esp_ble_gattc_register_for_notify(gattc_if, p->remote_bda, p->char_handle);
-        } else {
-            ESP_LOGE(TAG, "STREAM characteristic not found");
-        }
-
-        free(char_elem_result);
-        char_elem_result = NULL;
         break;
 
     case ESP_GATTC_REG_FOR_NOTIFY_EVT: {
@@ -569,33 +596,81 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         ESP_LOGI(TAG, "WRITE_DESCR_EVT ok (handle=0x%04x)", param->write.handle);
         break;
 
-    case ESP_GATTC_NOTIFY_EVT:
+    case ESP_GATTC_NOTIFY_EVT: {
+        // ---------- NOTIFY stats (PRO) ----------
+        int64_t now_us = esp_timer_get_time();
 
+        if (notify_stats.last_us >= 0) {
+            int64_t delta_us = now_us - notify_stats.last_us;
+
+            notify_stats.count++;
+            notify_stats.sum_us += delta_us;
+
+            if (delta_us < notify_stats.min_us) notify_stats.min_us = delta_us;
+            if (delta_us > notify_stats.max_us) notify_stats.max_us = delta_us;
+        } else {
+            // primo pacchetto: inizia finestra
+            notify_stats.window_start_us = now_us;
+        }
+
+        notify_stats.last_us = now_us;
+
+        // stampa UNA volta al secondo per minimizzare overhead
+        if ((now_us - notify_stats.window_start_us) >= 1000000LL) {
+
+            if (notify_stats.count > 0) {
+                int64_t avg_us = notify_stats.sum_us / (int64_t)notify_stats.count;
+                int64_t jitter_us = notify_stats.max_us - notify_stats.min_us;
+
+                ESP_LOGI(TAG,
+                    "NOTIFY stats (1s): cnt=%" PRIu32
+                    " avg=%" PRId64 " us (%.2f ms)"
+                    " min=%" PRId64 " us"
+                    " max=%" PRId64 " us"
+                    " jitter=%" PRId64 " us",
+                    notify_stats.count,
+                    avg_us, avg_us / 1000.0,
+                    notify_stats.min_us,
+                    notify_stats.max_us,
+                    jitter_us
+                );
+            }
+
+            // reset finestra
+            notify_stats.count = 0;
+            notify_stats.sum_us = 0;
+            notify_stats.min_us = INT64_MAX;
+            notify_stats.max_us = 0;
+            notify_stats.window_start_us = now_us;
+        }
+
+        // ---------- tua logica esistente ----------
         bool loss, wrong_data_len, counter_out_of_bound;
         dataloss_new_sample(param->notify.value, param->notify.value_len, &loss, &wrong_data_len, &counter_out_of_bound);
 
-        if(counter_out_of_bound)
+        if (counter_out_of_bound)
         {
-            ESP_LOGI(TAG, "Dataloss percentage %f%", dataloss_get_loss_percentage());
+            ESP_LOGI(TAG, "Dataloss percentage %f%%", dataloss_get_loss_percentage());
             ESP_LOGI(TAG, "Number of losses %u", dataloss_number_losses());
             ESP_LOGI(TAG, "DISABLE -> disable notify");
             cccd_write(0x0000);
         }
         else
         {
-            if(loss)
+            if (loss)
             {
                 int num_samples_lost = dataloss_get_last_loss_amplitude();
                 ESP_LOGW(TAG, "DATA LOSS, lost %d samples", num_samples_lost);
             }
 
-            if(wrong_data_len)
+            if (wrong_data_len)
             {
                 ESP_LOGW(TAG, "DATA LOSS, received only %d bytes", param->notify.value_len);
             }
         }
 
         break;
+    }
 
     case ESP_GATTC_DISCONNECT_EVT:
         ESP_LOGI(TAG, "DISCONNECT reason=0x%02x", param->disconnect.reason);
@@ -605,6 +680,15 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         p->service_end_handle = 0;
         p->char_handle = 0;
         p->cccd_handle = 0;
+
+        // reset stats
+        notify_stats.last_us = -1;
+        notify_stats.count = 0;
+        notify_stats.sum_us = 0;
+        notify_stats.min_us = INT64_MAX;
+        notify_stats.max_us = 0;
+        notify_stats.window_start_us = 0;
+
         esp_ble_gap_start_scanning(0);
         break;
 

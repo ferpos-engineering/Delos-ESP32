@@ -507,7 +507,7 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
 
             if (param->write.value[0]) {
                 ESP_LOGI(DEVICE_NAME, "LED ON!");
-                led_on();
+                led_on(param->write.value[0]);
             } else {
                 ESP_LOGI(DEVICE_NAME, "LED OFF!");
                 led_off();

@@ -12,11 +12,11 @@
 #include "led_strip.h"
 
 /* Defines */
-#define BLINK_GPIO CONFIG_EXAMPLE_BLINK_GPIO
+#define BLINK_GPIO GPIO_NUM_8
 
 /* Public function declarations */
 uint8_t get_led_state(void);
-void led_on(void);
+void led_on(uint8_t state_num);
 void led_off(void);
 void led_init(void);
 

@@ -65,7 +65,7 @@
 #define BTN_POLL_MS                 20
 #define BTN_DEBOUNCE_MS             50
 
-#define ESP_PWR_LVL ESP_PWR_LVL_P9
+#define ESP_PWR_LVL ESP_PWR_LVL_N0
 
 static const char *DEVICE_NAME = "DPPS-DONGLE";
 
@@ -138,6 +138,25 @@ static notify_stats_t notify_stats = {
     .max_us = 0,
     .window_start_us = 0,
 };
+
+// --------------------- STREAM duration ---------------------
+
+typedef struct {
+    bool     active;
+    int64_t  start_us;   // timestamp del primo NOTIFY ricevuto
+    int64_t  last_us;    // timestamp dell'ultimo NOTIFY ricevuto
+    uint32_t packets;
+    uint64_t bytes;
+} stream_timer_t;
+
+static stream_timer_t stream_t = {
+    .active = false,
+    .start_us = -1,
+    .last_us = -1,
+    .packets = 0,
+    .bytes = 0,
+};
+
 
 // --------------------- Helpers ---------------------
 
@@ -234,6 +253,26 @@ static esp_err_t cccd_write(uint16_t value)
 
     dataloss_reset();
     ESP_LOGI(DEVICE_NAME, "CCCD write requested: 0x%04x", value);
+
+    // STREAM duration: arma/reset su enable, stampa su disable
+    if (value == 0x0001) {
+        stream_t.active = true;
+        stream_t.start_us = -1;
+        stream_t.last_us  = -1;
+        stream_t.packets  = 0;
+        stream_t.bytes    = 0;
+    } else if (value == 0x0000) {
+        if (stream_t.active && stream_t.start_us >= 0 && stream_t.last_us >= 0) {
+            int64_t dur_us = stream_t.last_us - stream_t.start_us;
+            ESP_LOGI(DEVICE_NAME,
+                     "STREAM duration: %.3f s, packets=%" PRIu32 ", bytes=%" PRIu64,
+                     dur_us / 1000000.0, stream_t.packets, stream_t.bytes);
+        } else {
+            ESP_LOGW(DEVICE_NAME, "STREAM duration: no data received");
+        }
+        stream_t.active = false;
+    }
+
     return ESP_OK;
 }
 
@@ -642,6 +681,16 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
     case ESP_GATTC_NOTIFY_EVT: {
         // ---------- NOTIFY stats (PRO) ----------
         int64_t now_us = esp_timer_get_time();
+
+        // STREAM duration: aggiorna start/last/counters
+        if (stream_t.active) {
+            if (stream_t.start_us < 0) {
+                stream_t.start_us = now_us;   // primo NOTIFY
+            }
+            stream_t.last_us = now_us;        // ultimo NOTIFY visto
+            stream_t.packets++;
+            stream_t.bytes += param->notify.value_len;
+        }
 
         if (notify_stats.last_us >= 0) {
             int64_t delta_us = now_us - notify_stats.last_us;

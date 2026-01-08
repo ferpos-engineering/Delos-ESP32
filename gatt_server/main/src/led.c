@@ -5,6 +5,9 @@
  */
 /* Includes */
 #include "led.h"
+
+#include <inttypes.h>
+
 #include "esp_log.h"
 #include "common.h"
 
@@ -47,13 +50,14 @@ void led_on(uint8_t state_num)
 {
     if(state_num >= NUM_LED_STATES)
     {
-        ESP_LOGW("LED", "state_num %d not supported", state_num);
+        ESP_LOGW("LED", "state_num %" PRIu32 " not supported", state_num);
         return;
     }
 
     struct led_states_t led_state = led_states[state_num];
 
-    ESP_LOGI("LED", "led_on R=%d, G=%d, B=%d", led_state.red, led_state.green, led_state.blue);
+    ESP_LOGI("LED", "led_on R=%" PRIu32 ", G=%" PRIu32 ", B=%" PRIu32,
+            led_state.red, led_state.green, led_state.blue);
 
     /* Set the LED pixel using RGB from 0 (0%) to 255 (100%) for each color */
     led_strip_set_pixel(led_strip, 0, led_state.red, led_state.green, led_state.blue);

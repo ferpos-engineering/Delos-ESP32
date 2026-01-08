@@ -21,17 +21,18 @@ struct led_states_t {
     uint32_t red;
     uint32_t green;
     uint32_t blue;
-    uint32_t blink_frequency;
+    float blink_frequency_hz; // set 0 to disable blinking
+    uint32_t duration_ms; // set 0 for infinite time.
 };
 
 /* Private variables */
 static uint8_t led_is_on;
 
 static struct led_states_t led_states[NUM_LED_STATES] = {
-    [LED_OFF] = { .red = 0, .green = 0, .blue = 0, .blink_frequency = 0 },
-    [LED_RED] = { .red = 255, .green = 0, .blue = 0, .blink_frequency = 0 },
-    [LED_GREEN] = { .red = 0, .green = 255, .blue = 0, .blink_frequency = 0 },
-    [LED_BLUE] = { .red = 0, .green = 0, .blue = 255, .blink_frequency = 0 },
+    [LED_OFF] = { .red = 0, .green = 0, .blue = 0, .blink_frequency_hz = 0, .duration_ms = 0 },
+    [LED_RED] = { .red = 255, .green = 0, .blue = 0, .blink_frequency_hz = 0, .duration_ms = 0 },
+    [LED_GREEN] = { .red = 0, .green = 255, .blue = 0, .blink_frequency_hz = 0, .duration_ms = 0 },
+    [LED_BLUE] = { .red = 0, .green = 0, .blue = 255, .blink_frequency_hz = 0, .duration_ms = 0 },
 };
 
 #ifdef CONFIG_EXAMPLE_BLINK_LED_STRIP

@@ -63,6 +63,15 @@ typedef struct {
 static led_stack_entry_t s_stack[LED_STACK_MAX];
 static uint8_t s_stack_len = 0;
 
+/**
+ * @brief Return monotonic time in microseconds.
+ *
+ * Used to compute state expiration deadlines.
+ *
+ * Note: in this implementation the timestamp is only available when the STRIP backend
+ * is enabled (uses esp_timer_get_time()). For GPIO-only builds, this returns 0 and thus
+ * finite durations are not supported unless you enable esp_timer as well.
+ */
 static uint64_t now_us(void)
 {
 #ifdef CONFIG_EXAMPLE_BLINK_LED_STRIP
@@ -108,6 +117,12 @@ static void stack_clear(void)
     s_stack_len = 0;
 }
 
+/**
+ * @brief Replace the persistent base state.
+ *
+ * Clears the whole stack and sets @p state as the new bottom (infinite) state.
+ * Passing LED_OFF clears the stack and leaves no active base.
+ */
 static void stack_set_base(uint8_t state)
 {
     stack_clear();
@@ -119,6 +134,13 @@ static void stack_set_base(uint8_t state)
     s_stack_len = 1;
 }
 
+/**
+ * @brief Push a new override state on top of the stack.
+ *
+ * @param state        The LED_* state to activate.
+ * @param duration_ms  Duration of the override. 0 => infinite (rare, but supported).
+ * @param tnow         Current time in microseconds (used to compute end_time_us).
+ */
 static void stack_push_override(uint8_t state, uint32_t duration_ms, uint64_t tnow)
 {
     // If stack full, drop the oldest (bottom) to make room (keeps most recent semantics)
@@ -144,6 +166,14 @@ static void stack_push_override(uint8_t state, uint32_t duration_ms, uint64_t tn
 
 static uint8_t s_active_state = LED_OFF;
 
+/**
+ * @brief Get the currently applied LED state (top of the state stack).
+ *
+ * This is the state that is effectively driving the LED right now.
+ * - If the LED is blinking, this still returns the logical state (e.g. LED_DATA_ACQUISITION),
+ *   not the instantaneous ON/OFF phase.
+ * - If no state is active, returns LED_OFF.
+ */
 uint8_t get_led_state(void)
 {
     return s_active_state;
@@ -156,7 +186,10 @@ static led_strip_handle_t led_strip;
 static esp_timer_handle_t s_toggle_timer = NULL; // periodic (blink)
 static esp_timer_handle_t s_expire_timer = NULL; // one-shot (state timeout)
 
+// The LED is currently blinking
 static bool s_blinking = false;
+
+// True when the LED is in the ON phase of the blinking; False when it is in the OFF phase of the blinking
 static bool s_phase_on = false;
 
 static void strip_apply_state(uint8_t state_num)
@@ -271,6 +304,15 @@ static void start_blink_if_needed(uint8_t state_num)
     ESP_ERROR_CHECK(esp_timer_start_periodic(s_toggle_timer, half_period_us));
 }
 
+/**
+ * @brief Apply the state currently on top of the stack.
+ *
+ * Responsibilities:
+ * - Stop any previously running timers (blink/expire)
+ * - Pop already-expired states from the top
+ * - Apply the new top state (OFF / solid / blink)
+ * - Arm the expiration timer if the top state has a finite duration
+ */
 static void apply_top_state_locked(void)
 {
     // stop any current behavior
@@ -301,6 +343,23 @@ static void apply_top_state_locked(void)
     start_expire_timer_for_top(tnow);
 }
 
+/**
+ * @brief Activate a LED state (color + optional blink) using the state table configuration.
+ *
+ * Semantics driven by led_states[state_num]:
+ * - blink_frequency_hz == 0  -> solid color (no blinking)
+ * - blink_frequency_hz  > 0  -> blink at the given frequency (Hz)
+ * - duration_ms == 0         -> infinite duration (persistent "base" state)
+ * - duration_ms  > 0         -> temporary override state
+ *
+ * Stacking rules (preemption + restore):
+ * - If you call led_on(TEMP) while another state is active, TEMP overrides it.
+ * - When TEMP expires, the driver restores the previous still-valid state.
+ * - If that previous state also expired while covered, the next one below is restored, etc.
+ *
+ * Special case:
+ * - state_num == LED_OFF -> same as led_off()
+ */
 void led_on(uint8_t state_num)
 {
     if (state_num >= NUM_LED_STATES) {
@@ -332,6 +391,11 @@ void led_on(uint8_t state_num)
     apply_top_state_locked();
 }
 
+/**
+ * @brief Force the LED to OFF immediately.
+ *
+ * This clears the entire state stack and stops any ongoing blinking and/or timeout timers.
+ */
 void led_off(void)
 {
     stack_clear();
@@ -340,6 +404,15 @@ void led_off(void)
     s_active_state = LED_OFF;
 }
 
+/**
+ * @brief Initialize LED hardware and internal timers.
+ *
+ * - Initializes the configured backend (addressable strip via RMT/SPI, or GPIO LED).
+ * - Creates internal esp_timer instances used for blinking and state expiration.
+ * - Leaves the LED in LED_OFF.
+ *
+ * Call this once at boot before using led_on()/led_off().
+ */
 void led_init(void)
 {
     led_strip_config_t strip_config = {
@@ -387,6 +460,16 @@ static void gpio_led_off_impl(void)
     gpio_set_level(CONFIG_EXAMPLE_BLINK_GPIO, true);
 }
 
+/**
+ * @brief Activate a LED state on the GPIO backend.
+ *
+ * GPIO backend notes:
+ * - The LED is a single on/off output (no RGB). Any state != LED_OFF is treated as ON.
+ * - The same stacking and duration semantics are applied, so temporary overrides restore
+ *   the previous state when they expire.
+ * - Blinking is not implemented on the GPIO backend in this file (solid ON only).
+ */
+
 void led_on(uint8_t state_num)
 {
     // For GPIO-only LED, we treat any non-OFF as ON. Still apply the stack logic.
@@ -416,12 +499,22 @@ void led_on(uint8_t state_num)
     s_active_state = state_num;
 }
 
+/**
+ * @brief Force the GPIO LED OFF and clear state stack.
+ */
+
 void led_off(void)
 {
     stack_clear();
     gpio_led_off_impl();
     s_active_state = LED_OFF;
 }
+
+/**
+ * @brief Initialize the GPIO LED backend.
+ *
+ * Configures CONFIG_EXAMPLE_BLINK_GPIO as output (active-low) and switches the LED off.
+ */
 
 void led_init(void)
 {

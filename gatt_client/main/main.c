@@ -52,6 +52,8 @@
 
 #define REMOTE_DEVICE_NAME          "DPPS-DTS"
 #define REMOTE_SERVICE_UUID         0x1815   // AUTO_IO_SVC_UUID nel tuo server
+#define LED_DATALOSS                 6
+#define LED_THROTTLING_MS            2000
 
 // Buttons (ACTIVE LOW)
 #if CONFIG_IDF_TARGET_ESP32C6
@@ -91,6 +93,7 @@ struct gattc_profile_inst {
     uint16_t service_end_handle;
     uint16_t char_handle;
     uint16_t cccd_handle;
+    uint16_t led_char_handle;   // Handle della characteristic LED (WRITE) per comandare lo stato sul server
     esp_bd_addr_t remote_bda;
 };
 
@@ -102,6 +105,16 @@ static esp_bt_uuid_t remote_filter_char_uuid = {
         0xde, 0xef, 0x12, 0x12, 0x25, 0x15, 0x00, 0x01
     }},
 };
+
+// LED characteristic UUID (128-bit) ...0000 (deve combaciare col server) - usata per WRITE dello stato LED
+static esp_bt_uuid_t remote_led_char_uuid = {
+    .len = ESP_UUID_LEN_128,
+    .uuid = {.uuid128 = {
+        0x23, 0xd1, 0xbc, 0xea, 0x5f, 0x78, 0x23, 0x15,
+        0xde, 0xef, 0x12, 0x12, 0x25, 0x15, 0x00, 0x00
+    }},
+};
+
 
 // CCCD UUID 0x2902
 static esp_bt_uuid_t notify_descr_uuid = {
@@ -138,6 +151,9 @@ static notify_stats_t notify_stats = {
     .max_us = 0,
     .window_start_us = 0,
 };
+
+// throttling write LED_DATALOSS verso server
+static int64_t s_last_led_dataloss_cmd_us = -1;
 
 // --------------------- STREAM duration ---------------------
 
@@ -275,6 +291,41 @@ static esp_err_t cccd_write(uint16_t value)
 
     return ESP_OK;
 }
+
+/**
+ * @brief Scrive sul server lo stato LED (1 byte) tramite la characteristic LED (UUID ...0000).
+ *
+ * Il server interpreta il primo byte scritto come "state_num" e chiama led_on(state_num).
+ * Esempio: LED_DATALOSS=6 -> scrivere 0x06.
+ *
+ * Questa funzione è "best effort": se non siamo connessi o non abbiamo ancora scoperto
+ * l'handle della characteristic LED, non fa nulla e logga un warning.
+ */
+static esp_err_t led_write_state(uint8_t state_num)
+{
+    struct gattc_profile_inst *p = &gl_profile_tab[PROFILE_A_APP_ID];
+    if (!connect_ok || !service_ok || p->gattc_if == ESP_GATT_IF_NONE || p->conn_id == 0xFFFF || p->led_char_handle == 0) {
+        ESP_LOGW(DEVICE_NAME, "LED write skipped (conn/service/handle not ready)");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint8_t v = state_num;
+    // WRITE con risposta (più robusto); il server ha permessi READ|WRITE sulla char LED
+    esp_err_t err = esp_ble_gattc_write_char(
+        p->gattc_if,
+        p->conn_id,
+        p->led_char_handle,
+        sizeof(v),
+        &v,
+        ESP_GATT_WRITE_TYPE_RSP,
+        ESP_GATT_AUTH_REQ_NONE
+    );
+    if (err != ESP_OK) {
+        ESP_LOGW(DEVICE_NAME, "LED write failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
 
 static void button_task(void *arg)
 {
@@ -623,6 +674,41 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
             free(char_elem_result);
             char_elem_result = NULL;
         }
+
+        // Discover characteristic LED (WRITE) by UUID (...0000) - serve per comandare lo stato LED sul server
+        {
+            uint16_t count = 0;
+            esp_ble_gattc_get_attr_count(gattc_if, p->conn_id,
+                                         ESP_GATT_DB_CHARACTERISTIC,
+                                         p->service_start_handle,
+                                         p->service_end_handle,
+                                         INVALID_HANDLE,
+                                         &count);
+
+            if (count > 0) {
+                esp_gattc_char_elem_t *tmp = (esp_gattc_char_elem_t *)malloc(sizeof(esp_gattc_char_elem_t) * count);
+                if (!tmp) {
+                    ESP_LOGE(DEVICE_NAME, "malloc led char elem failed");
+                } else {
+                    esp_ble_gattc_get_char_by_uuid(gattc_if, p->conn_id,
+                                                   p->service_start_handle,
+                                                   p->service_end_handle,
+                                                   remote_led_char_uuid,
+                                                   tmp,
+                                                   &count);
+                    if (count > 0) {
+                        p->led_char_handle = tmp[0].char_handle;
+                        ESP_LOGI(DEVICE_NAME, "LED char handle=0x%04x (WRITE)", p->led_char_handle);
+                    } else {
+                        ESP_LOGW(DEVICE_NAME, "LED characteristic not found (UUID ...0000)");
+                    }
+                    free(tmp);
+                }
+            } else {
+                ESP_LOGW(DEVICE_NAME, "No characteristics in service while looking for LED char");
+            }
+        }
+
         break;
 
     case ESP_GATTC_REG_FOR_NOTIFY_EVT: {
@@ -759,6 +845,16 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
             {
                 ESP_LOGW(DEVICE_NAME, "DATA LOSS, received only %d bytes", param->notify.value_len);
             }
+
+            // Comanda il LED del SERVER in stato DATALOSS (scrive 0x06 sulla char LED).
+            // Throttle: evita di spammare WRITE ad ogni NOTIFY se il problema persiste.
+            if (loss || wrong_data_len) {
+                int64_t now_us = esp_timer_get_time();
+                if (s_last_led_dataloss_cmd_us < 0 || (now_us - s_last_led_dataloss_cmd_us) > (LED_THROTTLING_MS * 1000)) { // 2s
+                    s_last_led_dataloss_cmd_us = now_us;
+                    led_write_state(LED_DATALOSS);
+                }
+            }
         }
 
         break;
@@ -772,6 +868,8 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         p->service_end_handle = 0;
         p->char_handle = 0;
         p->cccd_handle = 0;
+        p->led_char_handle = 0;
+        s_last_led_dataloss_cmd_us = -1;
 
         // reset stats
         notify_stats.last_us = -1;

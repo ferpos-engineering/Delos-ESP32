@@ -490,12 +490,14 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
                 // Start task if not running
                 if (stream_task_handle == NULL) {
                     xTaskCreate(stream_notify_task, "Stream Notify", 3 * 1024, NULL, 5, &stream_task_handle);
+                    led_on(LED_DATA_ACQUISITION);
                 }
             } else {
                 // Stop task if running
                 if (stream_task_handle != NULL) {
                     vTaskDelete(stream_task_handle);
                     stream_task_handle = NULL;
+                    led_on(LED_CONNECTED);
                 }
             }
         }
@@ -507,7 +509,7 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
 
             if (param->write.value[0]) {
                 ESP_LOGI(DEVICE_NAME, "LED ON!");
-                led_on();
+                led_on(param->write.value[0]);
             } else {
                 ESP_LOGI(DEVICE_NAME, "LED OFF!");
                 led_off();
@@ -521,8 +523,10 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
         break;
     case ESP_GATTS_START_EVT:
         ESP_LOGI(DEVICE_NAME, "Service start, status %d, service_handle %d", param->start.status, param->start.service_handle);
+        led_on(LED_DISCONNECTED);        
         break;
     case ESP_GATTS_STOP_EVT:
+        led_on(LED_OFF);
         break;
     case ESP_GATTS_CONNECT_EVT:
         esp_ble_conn_update_params_t conn_params = {0};
@@ -541,12 +545,12 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
                 param->connect.conn_id, ESP_BD_ADDR_HEX(param->connect.remote_bda));
         gl_profile_tab[AUTO_IO_PROFILE_APP_ID].conn_id = param->connect.conn_id;
 
-        
         stream_gatts_if = gatts_if;
         stream_conn_id = param->connect.conn_id;
-		ble_rf_tune_on_connect(param->connect.remote_bda);
+        ble_rf_tune_on_connect(param->connect.remote_bda);
         
         esp_ble_gap_update_conn_params(&conn_params);
+        led_on(LED_CONNECTED);
         break;
 
     case ESP_GATTS_DISCONNECT_EVT:
@@ -563,6 +567,7 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
         }
 
         esp_ble_gap_start_advertising(&adv_params);
+        led_on(LED_DISCONNECTED);
     break;
 
     case ESP_GATTS_CONF_EVT:

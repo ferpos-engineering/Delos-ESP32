@@ -38,7 +38,7 @@ static struct led_states_t led_states[NUM_LED_STATES] = {
     [LED_BLUE] = { .red = 0, .green = 0, .blue = 255, .blink_frequency_hz = 0, .duration_ms = 0 },
     [LED_YELLOW] = { .red = 255, .green = 255, .blue = 0, .blink_frequency_hz = 0, .duration_ms = 0 },
     [LED_BATTERY_LOW] = { .red = 255, .green = 0, .blue = 0, .blink_frequency_hz = 1.0f, .duration_ms = 0 },
-    [LED_DATALOSS] = { .red = 255, .green = 255, .blue = 0, .blink_frequency_hz = 0, .duration_ms = 2000 },
+    [LED_DATALOSS] = { .red = 255, .green = 0, .blue = 0, .blink_frequency_hz = 0, .duration_ms = 2000 },
     [LED_DISCONNECTED] = { .red = 255, .green = 255, .blue = 255, .blink_frequency_hz = 0.5f, .duration_ms = 0 },
     [LED_CONNECTED] = { .red = 0, .green = 0, .blue = 255, .blink_frequency_hz = 0.5f, .duration_ms = 0 },
     [LED_DATA_ACQUISITION] = { .red = 0, .green = 255, .blue = 0, .blink_frequency_hz = 2.0f, .duration_ms = 0 },

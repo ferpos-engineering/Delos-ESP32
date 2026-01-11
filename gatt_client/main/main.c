@@ -37,8 +37,9 @@
 
 #include "driver/gpio.h"
 
-#include "dataloss.h"
-#include "prettyprinter.h"
+#include "include/dataloss.h"
+#include "include/prettyprinter.h"
+#include "include/nvs_manager.h"
 
 #ifndef INVALID_HANDLE
 #define INVALID_HANDLE 0
@@ -70,6 +71,12 @@
 #define ESP_PWR_LVL ESP_PWR_LVL_N0
 
 static const char *DEVICE_NAME = "DPPS-DONGLE";
+
+// Allowed peers for connections
+const esp_bd_addr_t* target_macs = NULL;
+
+// Number of allowed peers for connections
+uint8_t num_target_macs;
 
 // --------------------- Scan params ---------------------
 
@@ -214,6 +221,16 @@ static void ble_rf_tune_on_connect(esp_bd_addr_t peer_bda)
         ESP_LOGW("BLE", "set_preferred_phy failed: %s", esp_err_to_name(err));
     }
 }
+
+static bool bda_matches_target_macs(const esp_bd_addr_t bda)
+{
+    if (num_target_macs == 0) return false;
+    for (uint8_t i = 0; i < num_target_macs; i++) {
+        if (memcmp(bda, target_macs[i], sizeof(esp_bd_addr_t)) == 0) return true;
+    }
+    return false;
+}
+
 
 static bool adv_name_matches(const uint8_t *adv_data, const char *name)
 {
@@ -403,13 +420,33 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
             switch (param->scan_rst.search_evt)
             {
                 case ESP_GAP_SEARCH_INQ_RES_EVT:
-                    if (adv_name_matches(param->scan_rst.ble_adv, REMOTE_DEVICE_NAME)) {
-                        ESP_LOGI(DEVICE_NAME, "Found '%s' -> connect", REMOTE_DEVICE_NAME);
+                    {
+                        bool match = false;
+
+                        // If MAC targets are configured, accept ONLY those.
+                        if (num_target_macs > 0) {
+                            match = bda_matches_target_macs(param->scan_rst.bda);
+                            if (!match) {
+                                break;
+                            }
+                            ESP_LOGI(DEVICE_NAME,
+                                     "Found target MAC %02X:%02X:%02X:%02X:%02X:%02X -> connect",
+                                     param->scan_rst.bda[0], param->scan_rst.bda[1], param->scan_rst.bda[2],
+                                     param->scan_rst.bda[3], param->scan_rst.bda[4], param->scan_rst.bda[5]);
+                        } else {
+                            // Fallback: match by advertised device name (current behaviour)
+                            match = adv_name_matches(param->scan_rst.ble_adv, REMOTE_DEVICE_NAME);
+                            if (!match) {
+                                break;
+                            }
+                            ESP_LOGI(DEVICE_NAME, "Found '%s' -> connect", REMOTE_DEVICE_NAME);
+                        }
+
                         esp_ble_gap_stop_scanning();
                         esp_ble_gattc_open(gl_profile_tab[PROFILE_A_APP_ID].gattc_if,
-                                        param->scan_rst.bda,
-                                        param->scan_rst.ble_addr_type,
-                                        true);
+                                           param->scan_rst.bda,
+                                           param->scan_rst.ble_addr_type,
+                                           true);
                     }
                     break;
 
@@ -896,17 +933,20 @@ void app_main(void)
     gl_profile_tab[PROFILE_A_APP_ID].gattc_if = ESP_GATT_IF_NONE;
     gl_profile_tab[PROFILE_A_APP_ID].app_id = PROFILE_A_APP_ID;
 
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
+    ESP_ERROR_CHECK(nvs_manager_init_flash());
+
+    bool wrote = false;
+    ESP_ERROR_CHECK(nvs_manager_bootstrap_defaults(&wrote));
+    if (wrote) {
+        ESP_LOGI(DEVICE_NAME, "Default MAC list written to NVS");
     }
-    ESP_ERROR_CHECK(ret);
+
+    num_target_macs = nvs_manager_get_target_macs(&target_macs);
 
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
 
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-    ret = esp_bt_controller_init(&bt_cfg);
+    esp_err_t ret = esp_bt_controller_init(&bt_cfg);
     if (ret) {
         ESP_LOGE(DEVICE_NAME, "bt_controller_init failed: %s", esp_err_to_name(ret));
         return;

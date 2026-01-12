@@ -34,7 +34,7 @@ esp_err_t nvs_manager_init_flash(void);
  */
 esp_err_t nvs_manager_bootstrap_defaults(bool *wrote);
 
-uint8_t nvs_manager_get_target_macs(const esp_bd_addr_t** target_macs);
+void nvs_manager_get_target_macs(const esp_bd_addr_t** target_macs);
 
 /**
  * @brief Cancella i MAC salvati in NVS (mac0/mac1/mac2).

@@ -21,8 +21,7 @@ static const esp_bd_addr_t DEFAULT_MACS[NVS_MGR_MAX_PEERS] = {
 static const char *NVS_NS = "ble_cfg";
 static const char *KEYS[NVS_MGR_MAX_PEERS] = { "mac0", "mac1", "mac2" };
 
-static esp_bd_addr_t peripherals_macs[NVS_MGR_MAX_PEERS];
-static uint8_t num_peripherals_macs = 0;
+static esp_bd_addr_t peripherals_macs[NVS_MGR_MAX_PEERS] = {0};
 
 static bool is_valid_mac(const esp_bd_addr_t mac)
 {
@@ -85,7 +84,7 @@ esp_err_t nvs_manager_init_flash(void)
 esp_err_t nvs_manager_load_target_macs(bool *loaded)
 {
     memset(peripherals_macs, 0, sizeof(peripherals_macs));
-    num_peripherals_macs = 0;
+    int num_peripherals_macs = 0;
     if (loaded) *loaded = false;
 
     nvs_handle_t h;
@@ -183,14 +182,12 @@ esp_err_t nvs_manager_bootstrap_defaults(bool *wrote)
     #endif
 }
 
-uint8_t nvs_manager_get_target_macs(const esp_bd_addr_t** target_macs)
+void nvs_manager_get_target_macs(const esp_bd_addr_t** target_macs)
 {
     #ifdef NO_NVS
         if (target_macs) *target_macs = (const esp_bd_addr_t *)DEFAULT_MACS;
-        return (uint8_t)NVS_MGR_MAX_PEERS;
     #else
         if (target_macs) *target_macs = (const esp_bd_addr_t *)peripherals_macs;
-        return num_peripherals_macs;
     #endif
 }
 

@@ -78,7 +78,6 @@ static const char *DEVICE_NAME = "DPPS-DONGLE";
 const esp_bd_addr_t* target_macs = NULL;
 
 typedef struct {
-    bool            in_use;          // slot reserved (candidate or connected)
     bool            connected;       // true after CONNECT_EVT
     bool            service_ok;      // target service discovered
     bool            ready;           // CCCD handle found (can enable notify)
@@ -287,7 +286,7 @@ static int slot_find_by_bda(const esp_bd_addr_t bda)
 static int peer_find_by_conn_id(uint16_t conn_id)
 {
     for (int i = 0; i < NVS_MGR_MAX_PEERS; i++) {
-        if (s_peers[i].in_use && s_peers[i].connected && s_peers[i].conn_id == conn_id) return i;
+        if (s_peers[i].connected && s_peers[i].conn_id == conn_id) return i;
     }
     return -1;
 }
@@ -300,10 +299,11 @@ static int slot_find_by_char_handle(uint16_t char_handle)
     return -1;
 }
 
-static void peer_set_gatt_state(peer_ctx_t* peer, int slot, esp_ble_addr_type_t addr_type)
+static void peer_set_gatt_state(int slot, esp_ble_addr_type_t addr_type)
 {
+    peer_ctx_t* peer = &s_peers[slot]; 
+
     memset(&peer, 0, sizeof(peer));
-    peer->in_use = true;
     peer->connected = false;
     peer->service_ok = false;
     peer->ready = false;
@@ -343,7 +343,7 @@ static esp_err_t cccd_write(uint16_t value)
 
     for (int i = 0; i < NVS_MGR_MAX_PEERS; i++) {
         peer_ctx_t* peer = &s_peers[i];
-        if (!peer->in_use || !peer->connected || !peer->ready || peer->cccd_handle == 0) {
+        if (!peer->connected || !peer->ready || peer->cccd_handle == 0) {
             continue;
         }
 
@@ -474,13 +474,12 @@ static void connect_manager_task(void *arg)
 
             int connected_cnt = 0;
             for (int i = 0; i < NVS_MGR_MAX_PEERS; i++) {
-                if (s_peers[i].in_use && s_peers[i].connected) connected_cnt++;
+                if (s_peers[i].connected) connected_cnt++;
             }
 
             if (connected_cnt < NVS_MGR_MAX_PEERS) {
                 for (int i = 0; i < NVS_MGR_MAX_PEERS; i++) {
                     peer_ctx_t* peer = &s_peers[i];
-                    if (!peer->in_use) continue;
                     if (peer->connected) continue;
 
                     if (peer->next_reconnect_try_us != 0 && now_us < peer->next_reconnect_try_us) {
@@ -737,32 +736,34 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
             break;
         }
 
-        ESP_LOGI(DEVICE_NAME, "OPEN_EVT ok");
+        ESP_LOGI(DEVICE_NAME, "OPEN_EVT status=%d, conn_id=%d", param->open.status, param->open.conn_id);
         s_open_in_progress = false;
         break;
     }
 
     case ESP_GATTC_CONNECT_EVT: {
+
+        ESP_LOGI(DEVICE_NAME,
+            "ESP_GATTC_CONNECT_EVT (conn_id=%d)",
+            param->connect.conn_id
+        );
+
         int slot = slot_find_by_bda(param->connect.remote_bda);
         if (slot < 0) {
             ESP_LOGE(DEVICE_NAME, "peer_find_by_bda failed");
             break;
         }
 
-        peer_ctx_t* peer = &s_peers[slot];
-        peer_set_gatt_state(peer, slot, BLE_ADDR_TYPE_PUBLIC);
+        peer_set_gatt_state(slot, BLE_ADDR_TYPE_PUBLIC);
 
         ESP_LOGI(DEVICE_NAME, "CONNECT_EVT conn_id=%d", param->connect.conn_id);
 
-
+        peer_ctx_t* peer = &s_peers[slot];
         peer->connected = true;
         peer->want_reconnect = true;
         peer->conn_id = param->connect.conn_id;
         peer->service_ok = false;
         peer->ready = false;
-        memcpy(peer->bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
-
-        peer->conn_id = param->connect.conn_id;
         memcpy(peer->bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
 
         ble_rf_tune_on_connect(param->connect.remote_bda);
@@ -805,12 +806,21 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 
     case ESP_GATTC_CFG_MTU_EVT:
         ESP_LOGI(DEVICE_NAME, "CFG_MTU_EVT conn_id=%d mtu=%d", param->cfg_mtu.conn_id, param->cfg_mtu.mtu);
-        esp_ble_gattc_search_service(gattc_if, param->cfg_mtu.conn_id, NULL);
+        ESP_ERROR_CHECK(esp_ble_gattc_search_service(gattc_if, param->cfg_mtu.conn_id, NULL));
         break;
 
     case ESP_GATTC_SEARCH_RES_EVT: {
+
+        ESP_LOGI(DEVICE_NAME,
+            "ESP_GATTC_SEARCH_RES_EVT (conn_id=%d)",
+            param->search_res.conn_id
+        );
+
         int slot = peer_find_by_conn_id(param->search_res.conn_id);
-        if (slot < 0) break;
+        if (slot < 0) {
+            ESP_LOGE(DEVICE_NAME, "peer_find_by_conn_id failed");
+            break;
+        }
         peer_ctx_t* peer = &s_peers[slot];
         esp_gatt_id_t *srvc_id = &param->search_res.srvc_id;
 
@@ -826,8 +836,17 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
     }
 
     case ESP_GATTC_SEARCH_CMPL_EVT: {
+
+        ESP_LOGI(DEVICE_NAME,
+            "ESP_GATTC_SEARCH_CMPL_EVT (conn_id=%d)",
+            param->search_cmpl.conn_id
+        );
+
         int slot = peer_find_by_conn_id(param->search_cmpl.conn_id);
-        if (slot < 0) break;
+        if (slot < 0) {
+            ESP_LOGE(DEVICE_NAME, "peer_find_by_conn_id failed");
+            break;
+        }
         peer_ctx_t* peer = &s_peers[slot];
 
         if (!peer->service_ok) {
@@ -921,7 +940,10 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         );
 
         int slot = slot_find_by_char_handle(param->reg_for_notify.handle);
-        if (slot < 0) break;
+        if (slot < 0) {
+            ESP_LOGE(DEVICE_NAME, "slot_find_by_char_handle failed");
+            break;
+        }
         peer_ctx_t* peer = &s_peers[slot];
 
         if (param->reg_for_notify.status != ESP_GATT_OK) {
@@ -979,7 +1001,10 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
     case ESP_GATTC_NOTIFY_EVT: {
         // ---------- NOTIFY stats (PRO) ----------
         int slot = peer_find_by_conn_id(param->notify.conn_id);
-        if (slot < 0) break;
+        if (slot < 0) {
+            ESP_LOGE(DEVICE_NAME, "peer_find_by_conn_id failed");
+            break;
+        }
         peer_ctx_t* peer = &s_peers[slot];
 
         int64_t now_us = esp_timer_get_time();

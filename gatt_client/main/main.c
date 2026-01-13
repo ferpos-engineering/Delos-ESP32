@@ -123,8 +123,6 @@ struct gattc_profile_inst {
     esp_gattc_cb_t gattc_cb;
     uint16_t gattc_if;
     uint16_t app_id;
-    uint16_t service_start_handle;
-    uint16_t service_end_handle;
 };
 
 // STREAM characteristic UUID (128-bit) ...0001 (deve combaciare col server)
@@ -157,7 +155,7 @@ static struct gattc_profile_inst gl_profile_tab[PROFILE_NUM];
 static esp_gattc_char_elem_t  *char_elem_result  = NULL;
 static esp_gattc_descr_elem_t *descr_elem_result = NULL;
 
-// --------------------- NOTIFY stats (PRO) ---------------------
+// --------------------- NOTIFY stats ---------------------
 
 typedef struct {
     int64_t last_us;
@@ -170,14 +168,7 @@ typedef struct {
     int64_t window_start_us;
 } notify_stats_t;
 
-static notify_stats_t notify_stats = {
-    .last_us = -1,
-    .count = 0,
-    .sum_us = 0,
-    .min_us = INT64_MAX,
-    .max_us = 0,
-    .window_start_us = 0,
-};
+static notify_stats_t notify_stats_peers[NVS_MGR_MAX_PEERS];
 
 // --------------------- STREAM duration ---------------------
 
@@ -189,13 +180,7 @@ typedef struct {
     uint64_t bytes;
 } stream_timer_t;
 
-static stream_timer_t stream_t = {
-    .active = false,
-    .start_us = -1,
-    .last_us = -1,
-    .packets = 0,
-    .bytes = 0,
-};
+static stream_timer_t stream_timers_peers[NVS_MGR_MAX_PEERS];
 
 // --------------------- Helpers ---------------------
 
@@ -327,8 +312,18 @@ static void peer_reset_gatt_state(peer_ctx_t* peer)
     peer->cccd_handle = 0;
 }
 
-static esp_err_t cccd_write(uint16_t value)
+static esp_err_t cccd_write(int slot, uint16_t value)
 {
+    ESP_LOGI(DEVICE_NAME, "CCCD write request: 0x%04x (peers=%d)", value, slot);
+
+    peer_ctx_t* peer = &s_peers[slot];
+    if (!peer->connected || !peer->ready) {
+        ESP_LOGI(DEVICE_NAME, "CCCD write request failed: (peers=%d) connected=%d, ready=%d, cccd_handle=%u", slot, peer->connected, peer->ready, peer->cccd_handle);
+        return ESP_OK;
+    }
+
+    ESP_LOGI(DEVICE_NAME, "CCCD write request: (peers=%d) connected=%d, ready=%d, cccd_handle=%u", slot, peer->connected, peer->ready, peer->cccd_handle);
+
     struct gattc_profile_inst *profile = &gl_profile_tab[PROFILE_A_APP_ID];
 
     if (profile->gattc_if == ESP_GATT_IF_NONE) {
@@ -339,58 +334,44 @@ static esp_err_t cccd_write(uint16_t value)
     // CCCD è 2 byte little-endian
     uint8_t cccd[2] = { (uint8_t)(value & 0xFF), (uint8_t)((value >> 8) & 0xFF) };
 
-    int writes = 0;
+    esp_err_t err = esp_ble_gattc_write_char_descr(
+        profile->gattc_if,
+        peer->conn_id,
+        peer->cccd_handle,
+        sizeof(cccd),
+        cccd,
+        ESP_GATT_WRITE_TYPE_RSP,
+        ESP_GATT_AUTH_REQ_NONE
+    );
 
-    for (int i = 0; i < NVS_MGR_MAX_PEERS; i++) {
-        peer_ctx_t* peer = &s_peers[i];
-        if (!peer->connected || !peer->ready || peer->cccd_handle == 0) {
-            continue;
-        }
-
-        esp_err_t err = esp_ble_gattc_write_char_descr(
-            profile->gattc_if,
-            peer->conn_id,
-            peer->cccd_handle,
-            sizeof(cccd),
-            cccd,
-            ESP_GATT_WRITE_TYPE_RSP,
-            ESP_GATT_AUTH_REQ_NONE
-        );
-
-        if (err != ESP_OK) {
-            ESP_LOGE(DEVICE_NAME, "CCCD write failed (peer %d, conn_id=%u): %s", i, peer->conn_id, esp_err_to_name(err));
-            continue;
-        }
-
-        writes++;
-    }
-
-    if (writes == 0) {
-        ESP_LOGW(DEVICE_NAME, "CCCD write requested but no READY peers available (value=0x%04x)", value);
+    if (err != ESP_OK) {
+        ESP_LOGE(DEVICE_NAME, "CCCD write failed (peer=%d, conn_id=%u): %s", slot, peer->conn_id, esp_err_to_name(err));
         return ESP_FAIL;
     }
 
-    dataloss_reset();
-    ESP_LOGI(DEVICE_NAME, "CCCD write requested: 0x%04x (peers=%d)", value, writes);
+    dataloss_reset(slot);
 
     // STREAM duration: arma/reset su enable, stampa su disable
+    stream_timer_t* stream_t = &stream_timers_peers[slot];
     if (value == 0x0001) {
-        stream_t.active = true;
-        stream_t.start_us = -1;
-        stream_t.last_us  = -1;
-        stream_t.packets  = 0;
-        stream_t.bytes    = 0;
+        stream_t->active = true;
+        stream_t->start_us = -1;
+        stream_t->last_us  = -1;
+        stream_t->packets  = 0;
+        stream_t->bytes    = 0;
     } else if (value == 0x0000) {
-        if (stream_t.active && stream_t.start_us >= 0 && stream_t.last_us >= 0) {
-            int64_t dur_us = stream_t.last_us - stream_t.start_us;
+        if (stream_t->active && stream_t->start_us >= 0 && stream_t->last_us >= 0) {
+            int64_t dur_us = stream_t->last_us - stream_t->start_us;
             ESP_LOGI(DEVICE_NAME,
-                     "STREAM duration: %.3f s, packets=%" PRIu32 ", bytes=%" PRIu64,
-                     dur_us / 1000000.0, stream_t.packets, stream_t.bytes);
+                    "STREAM duration: %.3f s, packets=%" PRIu32 ", bytes=%" PRIu64,
+                    dur_us / 1000000.0, stream_t->packets, stream_t->bytes);
         } else {
             ESP_LOGW(DEVICE_NAME, "STREAM duration: no data received");
         }
-        stream_t.active = false;
+        stream_t->active = false;
     }
+
+    ESP_LOGI(DEVICE_NAME, "CCCD write requested: 0x%04x (peers=%d)", value, slot);
 
     return ESP_OK;
 }
@@ -446,7 +427,10 @@ static void button_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(BTN_DEBOUNCE_MS));
             if (gpio_get_level(BTN_ENABLE_GPIO) == 0) {
                 ESP_LOGI(DEVICE_NAME, "BTN_ENABLE -> enable notify");
-                cccd_write(0x0001);
+                for(int i = 0; i < NVS_MGR_MAX_PEERS; i++)
+                {
+                    cccd_write(i, 0x0001);
+                }
             }
         }
 
@@ -454,7 +438,10 @@ static void button_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(BTN_DEBOUNCE_MS));
             if (gpio_get_level(BTN_DISABLE_GPIO) == 0) {
                 ESP_LOGI(DEVICE_NAME, "BTN_DISABLE -> disable notify");
-                cccd_write(0x0000);
+                for(int i = 0; i < NVS_MGR_MAX_PEERS; i++)
+                {
+                    cccd_write(i, 0x0000);
+                }
             }
         }
 
@@ -876,17 +863,17 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
                 break;
             }
 
-            esp_ble_gattc_get_char_by_uuid(gattc_if, peer->conn_id,
+            ESP_ERROR_CHECK(esp_ble_gattc_get_char_by_uuid(gattc_if, peer->conn_id,
                                            peer->service_start_handle,
                                            peer->service_end_handle,
                                            remote_filter_char_uuid,
                                            tmp,
-                                           &count);
+                                           &count));
 
             if (count > 0) {
                 peer->char_handle = tmp[0].char_handle;
-                ESP_LOGI(DEVICE_NAME, "STREAM char handle=0x%04x (peer %d) -> register notify", peer->char_handle, slot);
-                esp_ble_gattc_register_for_notify(gattc_if, peer->bda, peer->char_handle);
+                ESP_LOGI(DEVICE_NAME, "STREAM char handle=%u (peer %d) -> register notify", peer->char_handle, slot);
+                ESP_ERROR_CHECK(esp_ble_gattc_register_for_notify(gattc_if, peer->bda, peer->char_handle));
             } else {
                 ESP_LOGE(DEVICE_NAME, "STREAM characteristic not found (peer %d)", slot);
             }
@@ -917,7 +904,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
                                                    &count);
                     if (count > 0) {
                         peer->led_char_handle = tmp[0].char_handle;
-                        ESP_LOGI(DEVICE_NAME, "LED char handle=0x%04x (WRITE)", peer->led_char_handle);
+                        ESP_LOGI(DEVICE_NAME, "LED char handle=%u (WRITE)", peer->led_char_handle);
                     } else {
                         ESP_LOGW(DEVICE_NAME, "LED characteristic not found (UUID ...0000)");
                     }
@@ -933,18 +920,20 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 
     case ESP_GATTC_REG_FOR_NOTIFY_EVT: {
 
-        ESP_LOGI(DEVICE_NAME,
-            "REG_FOR_NOTIFY Notify registered: handle=%u status=%d",
-            param->reg_for_notify.handle,
-            param->reg_for_notify.status
-        );
-
         int slot = slot_find_by_char_handle(param->reg_for_notify.handle);
         if (slot < 0) {
             ESP_LOGE(DEVICE_NAME, "slot_find_by_char_handle failed");
             break;
         }
+
         peer_ctx_t* peer = &s_peers[slot];
+        ESP_LOGI(DEVICE_NAME,
+            "REG_FOR_NOTIFY Notify registered: (slot=%d) handle=%u status=%d char_handle=%u",
+            slot,
+            param->reg_for_notify.handle,
+            param->reg_for_notify.status,
+            peer->char_handle
+        );
 
         if (param->reg_for_notify.status != ESP_GATT_OK) {
             ESP_LOGE(DEVICE_NAME, "REG_FOR_NOTIFY failed (peer %d), status=%d", slot, param->reg_for_notify.status);
@@ -953,12 +942,12 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 
         // Find CCCD descriptor (0x2902)
         uint16_t count = 0;
-        esp_ble_gattc_get_attr_count(gattc_if, peer->conn_id,
+        ESP_ERROR_CHECK(esp_ble_gattc_get_attr_count(gattc_if, peer->conn_id,
                                      ESP_GATT_DB_DESCRIPTOR,
                                      peer->service_start_handle,
                                      peer->service_end_handle,
                                      peer->char_handle,
-                                     &count);
+                                     &count));
 
         if (count == 0) {
             ESP_LOGE(DEVICE_NAME, "No descriptors found for STREAM char (peer %d)", slot);
@@ -971,17 +960,17 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
             break;
         }
 
-        esp_ble_gattc_get_descr_by_char_handle(gattc_if,
+        ESP_ERROR_CHECK(esp_ble_gattc_get_descr_by_char_handle(gattc_if,
                                               peer->conn_id,
                                               peer->char_handle,
                                               notify_descr_uuid,
                                               tmp,
-                                              &count);
+                                              &count));
 
         if (count > 0) {
             peer->cccd_handle = tmp[0].handle;
             peer->ready = true;
-            ESP_LOGI(DEVICE_NAME, "CCCD handle=0x%04x (peer %d) - READY", peer->cccd_handle, slot);
+            ESP_LOGI(DEVICE_NAME, "CCCD handle=%u (peer %d) - READY", peer->cccd_handle, slot);
         } else {
             ESP_LOGE(DEVICE_NAME, "CCCD (0x2902) not found (peer %d)", slot);
         }
@@ -995,7 +984,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
             ESP_LOGE(DEVICE_NAME, "WRITE_DESCR_EVT failed, status=0x%x", param->write.status);
             break;
         }
-        ESP_LOGI(DEVICE_NAME, "WRITE_DESCR_EVT ok (handle=0x%04x)", param->write.handle);
+        ESP_LOGI(DEVICE_NAME, "WRITE_DESCR_EVT ok (handle=%u)", param->write.handle);
         break;
 
     case ESP_GATTC_NOTIFY_EVT: {
@@ -1010,74 +999,77 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         int64_t now_us = esp_timer_get_time();
 
         // STREAM duration: aggiorna start/last/counters
-        if (stream_t.active) {
-            if (stream_t.start_us < 0) {
-                stream_t.start_us = now_us;   // primo NOTIFY
+        stream_timer_t* stream_t = &stream_timers_peers[slot];
+        if (stream_t->active) {
+            if (stream_t->start_us < 0) {
+                stream_t->start_us = now_us;   // primo NOTIFY
             }
-            stream_t.last_us = now_us;        // ultimo NOTIFY visto
-            stream_t.packets++;
-            stream_t.bytes += param->notify.value_len;
+            stream_t->last_us = now_us;        // ultimo NOTIFY visto
+            stream_t->packets++;
+            stream_t->bytes += param->notify.value_len;
         }
 
-        if (notify_stats.last_us >= 0) {
-            int64_t delta_us = now_us - notify_stats.last_us;
+        notify_stats_t* notify_stats = &notify_stats_peers[slot];
+        if (notify_stats->last_us >= 0) {
+            int64_t delta_us = now_us - notify_stats->last_us;
 
-            notify_stats.count++;
-            notify_stats.sum_us += delta_us;
+            notify_stats->count++;
+            notify_stats->sum_us += delta_us;
 
-            if (delta_us < notify_stats.min_us) notify_stats.min_us = delta_us;
-            if (delta_us > notify_stats.max_us) notify_stats.max_us = delta_us;
+            if (delta_us < notify_stats->min_us) notify_stats->min_us = delta_us;
+            if (delta_us > notify_stats->max_us) notify_stats->max_us = delta_us;
         } else {
             // primo pacchetto: inizia finestra
-            notify_stats.window_start_us = now_us;
+            notify_stats->window_start_us = now_us;
         }
 
-        notify_stats.last_us = now_us;
+        notify_stats->last_us = now_us;
 
         // stampa UNA volta al secondo per minimizzare overhead
-        if ((now_us - notify_stats.window_start_us) >= 1000000LL) {
+        if ((now_us - notify_stats->window_start_us) >= 1000000LL) {
 
-            if (notify_stats.count > 0) {
-                int64_t avg_us = notify_stats.sum_us / (int64_t)notify_stats.count;
-                int64_t jitter_us = notify_stats.max_us - notify_stats.min_us;
+            if (notify_stats->count > 0) {
+                int64_t avg_us = notify_stats->sum_us / (int64_t)notify_stats->count;
+                int64_t jitter_us = notify_stats->max_us - notify_stats->min_us;
 
                 ESP_LOGI(DEVICE_NAME,
-                    "NOTIFY stats (1s): cnt=%" PRIu32
+                    "NOTIFY stats peer=%d (1s): cnt=%" PRIu32
                     " avg=%" PRId64 " us (%.2f ms)"
                     " min=%" PRId64 " us"
                     " max=%" PRId64 " us"
                     " jitter=%" PRId64 " us",
-                    notify_stats.count,
+                    slot,
+                    notify_stats->count,
                     avg_us, avg_us / 1000.0,
-                    notify_stats.min_us,
-                    notify_stats.max_us,
+                    notify_stats->min_us,
+                    notify_stats->max_us,
                     jitter_us
                 );
             }
 
             // reset finestra
-            notify_stats.count = 0;
-            notify_stats.sum_us = 0;
-            notify_stats.min_us = INT64_MAX;
-            notify_stats.max_us = 0;
-            notify_stats.window_start_us = now_us;
+            notify_stats->count = 0;
+            notify_stats->sum_us = 0;
+            notify_stats->min_us = INT64_MAX;
+            notify_stats->max_us = 0;
+            notify_stats->window_start_us = now_us;
         }
 
         bool loss, wrong_data_len, counter_out_of_bound;
-        dataloss_new_sample(param->notify.value, param->notify.value_len, &loss, &wrong_data_len, &counter_out_of_bound);
+        dataloss_new_sample(slot, param->notify.value, param->notify.value_len, &loss, &wrong_data_len, &counter_out_of_bound);
 
         if (counter_out_of_bound)
         {
-            ESP_LOGI(DEVICE_NAME, "Dataloss percentage %f%%", dataloss_get_loss_percentage());
-            ESP_LOGI(DEVICE_NAME, "Number of losses %u", dataloss_number_losses());
-            ESP_LOGI(DEVICE_NAME, "DISABLE -> disable notify");
-            cccd_write(0x0000);
+            ESP_LOGI(DEVICE_NAME, "peer=%d Dataloss percentage %f%%", slot, dataloss_get_loss_percentage(slot));
+            ESP_LOGI(DEVICE_NAME, "peer=%d Number of losses %u", slot, dataloss_number_losses(slot));
+            ESP_LOGI(DEVICE_NAME, "peer=%d DISABLE -> disable notify", slot );
+            cccd_write(slot, 0x0000);
         }
         else
         {
             if (loss)
             {
-                int num_samples_lost = dataloss_get_last_loss_amplitude();
+                int num_samples_lost = dataloss_get_last_loss_amplitude(slot);
                 ESP_LOGW(DEVICE_NAME, "DATA LOSS, lost %d samples", num_samples_lost);
             }
 
@@ -1124,12 +1116,13 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         peer->s_last_led_dataloss_cmd_us = -1;
 
         // reset stats
-        notify_stats.last_us = -1;
-        notify_stats.count = 0;
-        notify_stats.sum_us = 0;
-        notify_stats.min_us = INT64_MAX;
-        notify_stats.max_us = 0;
-        notify_stats.window_start_us = 0;
+        notify_stats_t* notify_stats = &notify_stats_peers[slot];
+        notify_stats->last_us = -1;
+        notify_stats->count = 0;
+        notify_stats->sum_us = 0;
+        notify_stats->min_us = INT64_MAX;
+        notify_stats->max_us = 0;
+        notify_stats->window_start_us = 0;
 
         // Keep scanning so that returning peers are seen quickly
         esp_ble_gap_start_scanning(0);
@@ -1145,6 +1138,26 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 
 void app_main(void)
 {
+    for(int i = 0; i < NVS_MGR_MAX_PEERS; i++)
+    {
+        notify_stats_t* notify_stats = &notify_stats_peers[i];
+        notify_stats->last_us = -1;
+        notify_stats->count = 0;
+        notify_stats->sum_us = 0;
+        notify_stats->min_us = INT64_MAX;
+        notify_stats->max_us = 0;
+        notify_stats->window_start_us = 0;
+
+		stream_timer_t* stream_timers = &stream_timers_peers[i];
+		stream_timers->active = false;
+		stream_timers->start_us = -1;
+		stream_timers->last_us = -1;
+		stream_timers->packets = 0;
+		stream_timers->bytes = 0;
+    }
+
+    dataloss_init();
+
     memset(gl_profile_tab, 0, sizeof(gl_profile_tab));
     gl_profile_tab[PROFILE_A_APP_ID].gattc_cb = gattc_profile_event_handler;
     gl_profile_tab[PROFILE_A_APP_ID].gattc_if = ESP_GATT_IF_NONE;

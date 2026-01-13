@@ -523,7 +523,7 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
         break;
     case ESP_GATTS_START_EVT:
         ESP_LOGI(DEVICE_NAME, "Service start, status %d, service_handle %d", param->start.status, param->start.service_handle);
-        led_on(LED_DISCONNECTED);        
+        led_on(LED_DISCONNECTED);
         break;
     case ESP_GATTS_STOP_EVT:
         led_on(LED_OFF);

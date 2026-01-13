@@ -37,6 +37,7 @@
 
 #include "driver/gpio.h"
 
+#include "led.h"
 #include "dataloss.h"
 #include "prettyprinter.h"
 
@@ -277,7 +278,19 @@ static esp_err_t cccd_write(uint16_t value)
         stream_t.last_us  = -1;
         stream_t.packets  = 0;
         stream_t.bytes    = 0;
+
+        if(get_led_state() == LED_CONNECTED)
+        {
+            led_on(LED_DATA_ACQUISITION);
+        }
+
     } else if (value == 0x0000) {
+
+        if(get_led_state() == LED_DATA_ACQUISITION)
+        {
+            led_on(LED_CONNECTED);
+        }
+
         if (stream_t.active && stream_t.start_us >= 0 && stream_t.last_us >= 0) {
             int64_t dur_us = stream_t.last_us - stream_t.start_us;
             ESP_LOGI(DEVICE_NAME,
@@ -608,6 +621,8 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         break;
 
     case ESP_GATTC_CFG_MTU_EVT:
+        led_init();
+        led_on(LED_CONNECTED);
         ESP_LOGI(DEVICE_NAME, "CFG_MTU_EVT mtu=%d", param->cfg_mtu.mtu);
         // avvia discovery dei servizi
         esp_ble_gattc_search_service(gattc_if, param->cfg_mtu.conn_id, NULL);
@@ -831,6 +846,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
             ESP_LOGI(DEVICE_NAME, "Dataloss percentage %f%%", dataloss_get_loss_percentage());
             ESP_LOGI(DEVICE_NAME, "Number of losses %u", dataloss_number_losses());
             ESP_LOGI(DEVICE_NAME, "DISABLE -> disable notify");
+
             cccd_write(0x0000);
         }
         else
@@ -879,6 +895,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         notify_stats.max_us = 0;
         notify_stats.window_start_us = 0;
 
+        led_on(LED_DISCONNECTED);
         esp_ble_gap_start_scanning(0);
         break;
 
@@ -895,6 +912,10 @@ void app_main(void)
     gl_profile_tab[PROFILE_A_APP_ID].gattc_cb = gattc_profile_event_handler;
     gl_profile_tab[PROFILE_A_APP_ID].gattc_if = ESP_GATT_IF_NONE;
     gl_profile_tab[PROFILE_A_APP_ID].app_id = PROFILE_A_APP_ID;
+
+    led_init();
+
+    led_on(LED_DISCONNECTED);
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {

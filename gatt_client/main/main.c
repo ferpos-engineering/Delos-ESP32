@@ -904,7 +904,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
                                                    &count);
                     if (count > 0) {
                         peer->led_char_handle = tmp[0].char_handle;
-                        ESP_LOGI(DEVICE_NAME, "LED char handle=%u (WRITE)", peer->led_char_handle);
+                        ESP_LOGI(DEVICE_NAME, "LED char handle=%u (peer %d) (WRITE)", peer->led_char_handle, slot);
                     } else {
                         ESP_LOGW(DEVICE_NAME, "LED characteristic not found (UUID ...0000)");
                     }

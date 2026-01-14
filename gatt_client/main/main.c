@@ -699,7 +699,7 @@ static void gattc_profile_event_handler(int slot, esp_gattc_cb_event_t event, es
             break;
         }
 
-        ESP_LOGI(DEVICE_NAME, "OPEN_EVT peer=%d, status=%d, conn_id=%d", slot, param->open.status, param->open.conn_id);
+        ESP_LOGI(DEVICE_NAME, "OPEN_EVT peer=%d, status=%d, conn_id=%d, peer_conn_id=%d", slot, param->open.status, param->open.conn_id, peer->conn_id);
         s_open_in_progress = false;
         break;
     }
@@ -761,23 +761,20 @@ static void gattc_profile_event_handler(int slot, esp_gattc_cb_event_t event, es
     }
 
     case ESP_GATTC_CFG_MTU_EVT:
-        ESP_LOGI(DEVICE_NAME, "CFG_MTU_EVT conn_id=%d mtu=%d", param->cfg_mtu.conn_id, param->cfg_mtu.mtu);
+        ESP_LOGI(DEVICE_NAME, "CFG_MTU_EVT peer=%d, status=%d, conn_id=%d, peer_conn_id=%d, mtu=%d", slot, param->cfg_mtu.status, param->cfg_mtu.conn_id, peer->conn_id, param->cfg_mtu.mtu);
         ESP_ERROR_CHECK(esp_ble_gattc_search_service(gattc_if, param->cfg_mtu.conn_id, NULL));
         break;
 
     case ESP_GATTC_SEARCH_RES_EVT: {
 
-        ESP_LOGI(DEVICE_NAME,
-            "ESP_GATTC_SEARCH_RES_EVT (conn_id=%d)",
-            param->search_res.conn_id
-        );
+        ESP_LOGI(DEVICE_NAME, "ESP_GATTC_SEARCH_RES_EVT peer=%d, conn_id=%d, peer_conn_id=%d", slot, param->search_res.conn_id, peer->conn_id);
 
         esp_gatt_id_t *srvc_id = &param->search_res.srvc_id;
 
         if (srvc_id->uuid.len == ESP_UUID_LEN_16 &&
             srvc_id->uuid.uuid.uuid16 == REMOTE_SERVICE_UUID) {
 
-            ESP_LOGI(DEVICE_NAME, "Found service 0x%04x (peer %d, conn_id=%u)", REMOTE_SERVICE_UUID, slot, peer->conn_id);
+            ESP_LOGI(DEVICE_NAME, "Found service 0x%04x, peer=%d, conn_id=%d, peer_conn_id=%d", slot, param->search_res.conn_id, peer->conn_id);
             peer->service_ok = true;
             peer->service_start_handle = param->search_res.start_handle;
             peer->service_end_handle   = param->search_res.end_handle;
@@ -787,14 +784,11 @@ static void gattc_profile_event_handler(int slot, esp_gattc_cb_event_t event, es
 
     case ESP_GATTC_SEARCH_CMPL_EVT: {
 
-        ESP_LOGI(DEVICE_NAME,
-            "ESP_GATTC_SEARCH_CMPL_EVT (conn_id=%d)",
-            param->search_cmpl.conn_id
-        );
+        ESP_LOGI(DEVICE_NAME, "ESP_GATTC_SEARCH_CMPL_EVT, peer=%d, conn_id=%d, peer_conn_id=%d", slot, param->search_cmpl.conn_id, peer->conn_id);
 
         if (!peer->service_ok) {
             ESP_LOGW(DEVICE_NAME, "Service 0x%04x not found (peer %d) -> close", REMOTE_SERVICE_UUID, slot);
-            esp_ble_gattc_close(gattc_if, peer->conn_id);
+            esp_ble_gattc_close(gattc_if, param->search_cmpl.conn_id);
             break;
         }
 
@@ -816,7 +810,7 @@ static void gattc_profile_event_handler(int slot, esp_gattc_cb_event_t event, es
             }
 
             if (count == 0) {
-                ESP_LOGE(DEVICE_NAME, "No characteristics found in service (peer %d)", slot);
+                ESP_LOGE(DEVICE_NAME, "No characteristics found in service while looking for STREAM (peer %d)", slot);
                 break;
             }
 
@@ -863,29 +857,30 @@ static void gattc_profile_event_handler(int slot, esp_gattc_cb_event_t event, es
                 break;
             }
 
-            if (count > 0) {
-                esp_gattc_char_elem_t *tmp = (esp_gattc_char_elem_t *)malloc(sizeof(esp_gattc_char_elem_t) * count);
-                if (!tmp) {
-                    ESP_LOGE(DEVICE_NAME, "malloc led char elem failed");
-                } else {
-                    ESP_ERROR_CHECK(esp_ble_gattc_get_char_by_uuid(
-                                                   gattc_if,
-                                                   param->search_cmpl.conn_id,
-                                                   peer->service_start_handle,
-                                                   peer->service_end_handle,
-                                                   remote_led_char_uuid,
-                                                   tmp,
-                                                   &count));
-                    if (count > 0) {
-                        peer->led_char_handle = tmp[0].char_handle;
-                        ESP_LOGI(DEVICE_NAME, "LED char handle=%u (peer %d) (WRITE)", peer->led_char_handle, slot);
-                    } else {
-                        ESP_LOGW(DEVICE_NAME, "LED characteristic not found (UUID ...0000)");
-                    }
-                    free(tmp);
-                }
+            if (count == 0) {
+                ESP_LOGE(DEVICE_NAME, "No characteristics in service while looking for LED char (peer %d)", slot);
+                break;
+            }
+
+            esp_gattc_char_elem_t *tmp = (esp_gattc_char_elem_t *)malloc(sizeof(esp_gattc_char_elem_t) * count);
+            if (!tmp) {
+                ESP_LOGE(DEVICE_NAME, "malloc led char elem failed");
             } else {
-                ESP_LOGW(DEVICE_NAME, "No characteristics in service while looking for LED char");
+                ESP_ERROR_CHECK(esp_ble_gattc_get_char_by_uuid(
+                                                gattc_if,
+                                                param->search_cmpl.conn_id,
+                                                peer->service_start_handle,
+                                                peer->service_end_handle,
+                                                remote_led_char_uuid,
+                                                tmp,
+                                                &count));
+                if (count > 0) {
+                    peer->led_char_handle = tmp[0].char_handle;
+                    ESP_LOGI(DEVICE_NAME, "LED char handle=%u (peer %d) (WRITE)", peer->led_char_handle, slot);
+                } else {
+                    ESP_LOGW(DEVICE_NAME, "LED characteristic not found (peer %d)", slot);
+                }
+                free(tmp);
             }
         }
 
@@ -909,12 +904,16 @@ static void gattc_profile_event_handler(int slot, esp_gattc_cb_event_t event, es
 
         // Find CCCD descriptor (0x2902)
         uint16_t count = 0;
-        ESP_ERROR_CHECK(esp_ble_gattc_get_attr_count(gattc_if, peer->conn_id,
-                                     ESP_GATT_DB_DESCRIPTOR,
-                                     peer->service_start_handle,
-                                     peer->service_end_handle,
-                                     peer->char_handle,
-                                     &count));
+        esp_gatt_status_t ret_status = esp_ble_gattc_get_attr_count(gattc_if,
+                                                                    peer->conn_id,
+                                                                    ESP_GATT_DB_DESCRIPTOR,
+                                                                    peer->service_start_handle,
+                                                                    peer->service_end_handle,
+                                                                    peer->char_handle,
+                                                                    &count);
+        if (ret_status != ESP_GATT_OK){
+            ESP_LOGE(DEVICE_NAME, "esp_ble_gattc_get_attr_count error (peer %d)", slot);
+        }
 
         if (count == 0) {
             ESP_LOGE(DEVICE_NAME, "No descriptors found for STREAM char (peer %d)", slot);
@@ -929,7 +928,7 @@ static void gattc_profile_event_handler(int slot, esp_gattc_cb_event_t event, es
 
         ESP_ERROR_CHECK(esp_ble_gattc_get_descr_by_char_handle(gattc_if,
                                               peer->conn_id,
-                                              peer->char_handle,
+                                              param->reg_for_notify.handle,
                                               notify_descr_uuid,
                                               tmp,
                                               &count));

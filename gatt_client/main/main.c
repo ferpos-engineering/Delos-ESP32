@@ -268,7 +268,7 @@ static int slot_find_by_bda(const esp_bd_addr_t bda)
     return -1;
 }
 
-static int peer_find_by_conn_id(uint16_t conn_id)
+static int slot_find_by_conn_id(uint16_t conn_id)
 {
     for (int i = 0; i < NVS_MGR_MAX_PEERS; i++) {
         if (s_peers[i].connected && s_peers[i].conn_id == conn_id) return i;
@@ -279,7 +279,7 @@ static int peer_find_by_conn_id(uint16_t conn_id)
 static int slot_find_by_char_handle(uint16_t char_handle)
 {
     for (int i = 0; i < NVS_MGR_MAX_PEERS; i++) {
-        if (s_peers[i].char_handle == char_handle) return i;
+        if (!s_peers[i].ready && s_peers[i].char_handle == char_handle) return i;
     }
     return -1;
 }
@@ -803,7 +803,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
             param->search_res.conn_id
         );
 
-        int slot = peer_find_by_conn_id(param->search_res.conn_id);
+        int slot = slot_find_by_conn_id(param->search_res.conn_id);
         if (slot < 0) {
             ESP_LOGE(DEVICE_NAME, "peer_find_by_conn_id failed");
             break;
@@ -829,7 +829,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
             param->search_cmpl.conn_id
         );
 
-        int slot = peer_find_by_conn_id(param->search_cmpl.conn_id);
+        int slot = slot_find_by_conn_id(param->search_cmpl.conn_id);
         if (slot < 0) {
             ESP_LOGE(DEVICE_NAME, "peer_find_by_conn_id failed");
             break;
@@ -960,12 +960,15 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
             break;
         }
 
-        ESP_ERROR_CHECK(esp_ble_gattc_get_descr_by_char_handle(gattc_if,
-                                              peer->conn_id,
-                                              peer->char_handle,
-                                              notify_descr_uuid,
-                                              tmp,
-                                              &count));
+            esp_gatt_status_t  ret_status = esp_ble_gattc_get_descr_by_char_handle(gattc_if,
+                                                                peer->conn_id,
+                                                                param->reg_for_notify.handle,
+                                                                notify_descr_uuid,
+                                                                tmp,
+                                                                &count);
+            if (ret_status != ESP_GATT_OK){
+                ESP_LOGE(DEVICE_NAME, "esp_ble_gattc_get_descr_by_char_handle error");
+            }
 
         if (count > 0) {
             peer->cccd_handle = tmp[0].handle;
@@ -989,7 +992,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 
     case ESP_GATTC_NOTIFY_EVT: {
         // ---------- NOTIFY stats (PRO) ----------
-        int slot = peer_find_by_conn_id(param->notify.conn_id);
+        int slot = slot_find_by_conn_id(param->notify.conn_id);
         if (slot < 0) {
             ESP_LOGE(DEVICE_NAME, "peer_find_by_conn_id failed");
             break;
@@ -1093,7 +1096,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
     }
 
     case ESP_GATTC_DISCONNECT_EVT: {
-        int slot = peer_find_by_conn_id(param->disconnect.conn_id);
+        int slot = slot_find_by_conn_id(param->disconnect.conn_id);
         ESP_LOGI(DEVICE_NAME, "DISCONNECT conn_id=%d reason=0x%02x", param->disconnect.conn_id, param->disconnect.reason);
 
         if(slot < 0)

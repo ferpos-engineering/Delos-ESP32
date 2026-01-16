@@ -166,10 +166,10 @@ static void stream_notify_task(void *arg)
     uint32_t counter = 1;
     ESP_LOGI(DEVICE_NAME, "Stream notify Task Start");
 
-    while (1) {
-
-        if (stream_notify_enabled && stream_gatts_if != ESP_GATT_IF_NONE && stream_char_handle != 0) {
-
+    while (1)
+    {
+        if (stream_notify_enabled && stream_gatts_if != ESP_GATT_IF_NONE && stream_char_handle != 0)
+        {
           	// Example payload: counter in first 4 bytes + pattern
             memcpy(stream_payload, &counter, sizeof(counter));
             for (int i = 4; i < 16; i++) {
@@ -183,10 +183,10 @@ static void stream_notify_task(void *arg)
                 stream_char_handle,
                 sizeof(stream_payload),
                 stream_payload,
-                false
-            );
-            if (err != ESP_OK) {
-                ESP_LOGW(DEVICE_NAME, "stream notify failed: %s", esp_err_to_name(err));
+                false);
+            if (err != ESP_OK)
+            {
+                ESP_LOGW(DEVICE_NAME, "stream notify failed: %s stream_notify_enabled=%d", esp_err_to_name(err), stream_notify_enabled);
             }
             counter++;
         }
@@ -355,8 +355,8 @@ static void heart_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_ga
                     ESP_BD_ADDR_HEX(param->disconnect.remote_bda), param->disconnect.reason);
             esp_ble_gap_start_advertising(&adv_params);
         break;
-    case ESP_GATTS_CONF_EVT:
-        ESP_LOGI(DEVICE_NAME, "Confirm receive, status %d, attr_handle %d", param->conf.status, param->conf.handle);
+    case ESP_GATTS_CONF_EVT: 
+        ESP_LOGI(DEVICE_NAME, "Confirm receive, conn_id=%d, status %d, attr_handle %d", param->conf.conn_id, param->conf.status, param->conf.handle);
         if (param->conf.status != ESP_GATT_OK) {
             ESP_LOG_BUFFER_HEX(DEVICE_NAME, param->conf.value, param->conf.len);
         }
@@ -377,7 +377,8 @@ static void heart_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_ga
 static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param)
 {
     switch (event) {
-    case ESP_GATTS_REG_EVT:
+    
+        case ESP_GATTS_REG_EVT:
         ESP_LOGI(DEVICE_NAME, "GATT server register, status %d, app_id %d", param->reg.status, param->reg.app_id);
         gl_profile_tab[AUTO_IO_PROFILE_APP_ID].service_id.is_primary = true;
         gl_profile_tab[AUTO_IO_PROFILE_APP_ID].service_id.id.inst_id = 0x00;
@@ -385,6 +386,7 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
         gl_profile_tab[AUTO_IO_PROFILE_APP_ID].service_id.id.uuid.uuid.uuid16 = AUTO_IO_SVC_UUID;
         esp_ble_gatts_create_service(gatts_if, &gl_profile_tab[AUTO_IO_PROFILE_APP_ID].service_id, AUTO_IO_NUM_HANDLE);
         break;
+
     case ESP_GATTS_CREATE_EVT:
         //service has been created, now add characteristic declaration
         ESP_LOGI(DEVICE_NAME, "Service create, status %d, service_handle %d", param->create.status, param->create.service_handle);
@@ -486,18 +488,22 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
 
             ESP_LOGI(DEVICE_NAME, "STREAM notify %s", stream_notify_enabled ? "ENABLED" : "DISABLED");
 
-            if (stream_notify_enabled) {
+            if (stream_notify_enabled)
+            {
                 // Start task if not running
                 if (stream_task_handle == NULL) {
                     xTaskCreate(stream_notify_task, "Stream Notify", 3 * 1024, NULL, 5, &stream_task_handle);
                     led_on(LED_DATA_ACQUISITION);
                 }
-            } else {
+            }
+            else
+            {
+                led_on(LED_CONNECTED);
+
                 // Stop task if running
                 if (stream_task_handle != NULL) {
                     vTaskDelete(stream_task_handle);
                     stream_task_handle = NULL;
-                    led_on(LED_CONNECTED);
                 }
             }
         }
@@ -571,8 +577,9 @@ static void auto_io_gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_
     break;
 
     case ESP_GATTS_CONF_EVT:
-        ESP_LOGI(DEVICE_NAME, "Confirm receive, status %d, attr_handle %d", param->conf.status, param->conf.handle);
-        if (param->conf.status != ESP_GATT_OK) {
+        if (param->conf.status != ESP_GATT_OK)
+        {
+            ESP_LOGW(DEVICE_NAME, "Confirm receive, conn_id=%d, status %d, attr_handle %d", param->conf.conn_id, param->conf.status, param->conf.handle);
             ESP_LOG_BUFFER_HEX(DEVICE_NAME, param->conf.value, param->conf.len);
         }
         break;

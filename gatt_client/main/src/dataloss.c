@@ -16,69 +16,6 @@ typedef struct {
 
 static dataloss_info_t dataloss_info_peers[NUM_SLOTS];
 
-int test()
-{
-    // uint8_t data[NUM_DATA_PER_SAMPLE] = { 1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0x0a, 0x0b, 0x0c};
-    
-    // bool loss, wrong_data_len, counter_out_of_bound;
-    // dataloss_new_sample(data, countof(NUM_DATA_PER_SAMPLE), &loss, &wrong_data_len, &counter_out_of_bound);
-    
-    // if(loss)
-    // {
-    //     int num_samples_lost = dataloss_get_last_loss_amplitude();
-    //     printf("DATA LOSS, lost %d samples\r\n", num_samples_lost);
-    // }
-    
-    // data[0] = 2;
-    
-    // dataloss_new_sample(data, countof(NUM_DATA_PER_SAMPLE), &loss, &wrong_data_len, &counter_out_of_bound);
-    
-    // if(loss)
-    // {
-    //     int num_samples_lost = dataloss_get_last_loss_amplitude();
-    //     printf("DATA LOSS, lost %d samples\r\n", num_samples_lost);
-    // }    
-    
-    // dataloss_reset();
-    
-    // data[0] = 9;
-    
-    // dataloss_new_sample(data, countof(NUM_DATA_PER_SAMPLE), &loss, &wrong_data_len, &counter_out_of_bound);
-    
-    // if(loss)
-    // {
-    //     int num_samples_lost = dataloss_get_last_loss_amplitude();
-    //     printf("DATA LOSS, lost %d samples\r\n", num_samples_lost);
-    // }    
-    
-    // data[0] = 0xb;
-    
-    // dataloss_new_sample(data, countof(NUM_DATA_PER_SAMPLE), &loss, &wrong_data_len, &counter_out_of_bound);
-    
-    // if(loss)
-    // {
-    //     int num_samples_lost = dataloss_get_last_loss_amplitude();
-    //     printf("DATA LOSS, lost %d samples\r\n", num_samples_lost);
-    // }    
-    
-    // data[0] = 0x0f;
-    // data[1] = 0;
-    
-    // dataloss_new_sample(data, countof(NUM_DATA_PER_SAMPLE), &loss, &wrong_data_len, &counter_out_of_bound);    
-    
-    // if(loss)
-    // {
-    //     int num_samples_lost = dataloss_get_last_loss_amplitude();
-    //     printf("DATA LOSS, lost %d samples\r\n", num_samples_lost);
-    // }    
-    
-    
-    // printf("Loss percentage %f\r\n", dataloss_get_loss_percentage());
-    // printf("Number of losses %lu\r\n", dataloss_number_losses());
-
-    return 0;
-}
-
 void dataloss_init()
 {
     for(int i = 0; i < NUM_SLOTS; i++)

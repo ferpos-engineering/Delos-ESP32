@@ -101,6 +101,8 @@ typedef struct {
     bool            connected;       // true after CONNECT_EVT
     bool            service_ok;      // target service discovered
     bool            ready;           // CCCD handle found (can enable notify)
+    bool            stop_stream_command;
+    bool            stream_stopped;
 
     esp_bd_addr_t       bda;
     esp_ble_addr_type_t addr_type;
@@ -121,9 +123,6 @@ typedef struct {
 } peer_ctx_t;
 
 static peer_ctx_t s_peers[PEERS_NUM];
-
-// connection manager: allow only one esp_ble_gattc_open at a time (avoid ESP_GATT_BUSY)
-static volatile bool s_open_in_progress = false;
 
 // --------------------- Scan params ---------------------
 
@@ -277,7 +276,7 @@ static int find_slot_by_conn_id(uint16_t conn_id)
 {
     for (int i = 0; i < PEERS_NUM; i++)
     {
-        ESP_LOGW("find_slot_by_conn_id", "conn_id=%d,s_peers[%d].conn_id=%d, connected=%d, ready=%d", conn_id, i, s_peers[i].conn_id, s_peers[i].connected, s_peers[i].ready);
+        //ESP_LOGW("find_slot_by_conn_id", "conn_id=%d, s_peers[%d].conn_id=%d, connected=%d, ready=%d", conn_id, i, s_peers[i].conn_id, s_peers[i].connected, s_peers[i].ready);
         if (s_peers[i].conn_id == conn_id) return i;
     }
     return -1;
@@ -287,7 +286,7 @@ static int find_connected_slot_by_conn_id(uint16_t conn_id)
 {
     for (int i = 0; i < PEERS_NUM; i++)
     {
-        ESP_LOGW("find_connected_slot_by_conn_id", "conn_id=%d,s_peers[%d].conn_id=%d, connected=%d, ready=%d", conn_id, i, s_peers[i].conn_id, s_peers[i].connected, s_peers[i].ready);
+        //ESP_LOGW("find_connected_slot_by_conn_id", "conn_id=%d,s_peers[%d].conn_id=%d, connected=%d, ready=%d", conn_id, i, s_peers[i].conn_id, s_peers[i].connected, s_peers[i].ready);
         if (s_peers[i].connected && s_peers[i].conn_id == conn_id) return i;
     }
     return -1;
@@ -318,6 +317,8 @@ static void peer_reset_gatt_state(int slot)
     peer->connected = false;
     peer->service_ok = false;
     peer->ready = false;
+    peer->stop_stream_command = false;
+    peer->stream_stopped = false;
     peer->conn_id = 0xFFFF;
     peer->service_start_handle = 0;
     peer->service_end_handle = 0;
@@ -394,6 +395,22 @@ static esp_err_t cccd_write(int slot, uint16_t value)
     return ESP_OK;
 }
 
+void start_streams()
+{
+    for(int i = 0; i < PEERS_NUM; i++)
+    {
+        cccd_write(i, 0x0001);
+    }
+}
+
+void stop_streams()
+{
+    for(int i = 0; i < PEERS_NUM; i++)
+    {
+        cccd_write(i, 0x0000);
+    }
+}
+
 /**
  * @brief Scrive sul server lo stato LED (1 byte) tramite la characteristic LED (UUID ...0000).
  *
@@ -437,18 +454,26 @@ static void button_task(void *arg)
     int prev_en  = 1;
     int prev_dis = 1;
 
-    while (1) {
+    while (1)
+    {
         int en  = gpio_get_level(BTN_ENABLE_GPIO);
         int dis = gpio_get_level(BTN_DISABLE_GPIO);
+
+        for(int i = 0; i < PEERS_NUM; i++)
+        {
+            if(s_peers[i].stop_stream_command && !s_peers[i].stream_stopped)
+            {
+                ESP_LOGI(DEVICE_NAME, "STOP_STREAM peer=%d -> disable notify", i);
+                cccd_write(i, 0);
+                s_peers[i].stream_stopped = true;
+            }
+        }
 
         if (prev_en == 1 && en == 0) {
             vTaskDelay(pdMS_TO_TICKS(BTN_DEBOUNCE_MS));
             if (gpio_get_level(BTN_ENABLE_GPIO) == 0) {
                 ESP_LOGI(DEVICE_NAME, "BTN_ENABLE -> enable notify");
-                for(int i = 0; i < PEERS_NUM; i++)
-                {
-                    cccd_write(i, 0x0001);
-                }
+                start_streams();
             }
         }
 
@@ -456,10 +481,7 @@ static void button_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(BTN_DEBOUNCE_MS));
             if (gpio_get_level(BTN_DISABLE_GPIO) == 0) {
                 ESP_LOGI(DEVICE_NAME, "BTN_DISABLE -> disable notify");
-                for(int i = 0; i < PEERS_NUM; i++)
-                {
-                    cccd_write(i, 0x0000);
-                }
+                stop_streams();
             }
         }
 
@@ -468,51 +490,6 @@ static void button_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(BTN_POLL_MS));
     }
 }
-
-// static void connect_manager_task(void *arg)
-// {
-//     struct gattc_profile_inst* profile = &gl_profile_tab[PROFILE_A_APP_ID];
-
-//     while (1)
-//     {
-//         if (profile->gattc_if != ESP_GATT_IF_NONE && !s_open_in_progress)
-//         {
-//             int64_t now_us = esp_timer_get_time();
-//             int slot = -1;
-//             peer_ctx_t* peer = NULL;
-//             for (int i = 0; i < PEERS_NUM; i++)
-//             {
-//                 peer = &s_peers[i];
-//                 if (!peer->connected)
-//                 {
-//                     slot = i;
-//                     break;
-//                 }
-//             }
-
-//             if (slot >= 0 && (peer->next_reconnect_try_us == 0 || now_us >= peer->next_reconnect_try_us))
-//             {
-//                 esp_err_t err = esp_ble_gattc_open(profile->gattc_if, peer->bda, peer->addr_type, true);
-//                 if (err == ESP_OK)
-//                 {
-//                     s_open_in_progress = true;
-//                     ESP_LOGI(DEVICE_NAME,
-//                             "Connecting peer=%d to %02X:%02X:%02X:%02X:%02X:%02X",
-//                             slot,
-//                             peer->bda[0], peer->bda[1], peer->bda[2], peer->bda[3], peer->bda[4], peer->bda[5]);
-
-//                 }
-//                 else
-//                 {
-//                     // busy/invalid state -> retry later
-//                     peer->next_reconnect_try_us = now_us + 1000 * 1000; // 1s backoff
-//                 }
-//             }
-//         }
-
-//         vTaskDelay(pdMS_TO_TICKS(200));
-//     }
-// }
 
 // --------------------- Callbacks ---------------------
 
@@ -740,8 +717,6 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         {
             ESP_LOGW(DEVICE_NAME, "OPEN_EVT peer=%d failed status=%d", slot, param->open.status);
         }
-
-        s_open_in_progress = false;
         break;
     }
 
@@ -888,6 +863,11 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 
         peer_ctx_t* peer = &s_peers[slot];
 
+        if(peer->stop_stream_command || peer->stream_stopped)
+        {
+            break;
+        }
+
         int64_t now_us = esp_timer_get_time();
 
         // STREAM duration: aggiorna start/last/counters
@@ -918,8 +898,8 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         notify_stats->last_us = now_us;
 
         // stampa UNA volta al secondo per minimizzare overhead
-        if ((now_us - notify_stats->window_start_us) >= 1000000LL) {
-
+        if ((now_us - notify_stats->window_start_us) >= 1000000LL)
+        {
             if (notify_stats->count > 0) {
                 int64_t avg_us = notify_stats->sum_us / (int64_t)notify_stats->count;
                 int64_t jitter_us = notify_stats->max_us - notify_stats->min_us;
@@ -955,7 +935,8 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
             ESP_LOGI(DEVICE_NAME, "peer=%d Dataloss percentage %f%%", slot, dataloss_get_loss_percentage(slot));
             ESP_LOGI(DEVICE_NAME, "peer=%d Number of losses %u", slot, dataloss_number_losses(slot));
             ESP_LOGI(DEVICE_NAME, "peer=%d DISABLE -> disable notify", slot );
-            cccd_write(slot, 0x0000);
+            peer->stream_stopped = false;
+            peer->stop_stream_command = true;
         }
         else
         {
@@ -1042,11 +1023,16 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
                 ESP_LOGE(DEVICE_NAME, "esp_ble_gattc_get_descr_by_char_handle error");
             }
 
-        if (count > 0) {
+        if (count > 0)
+        {
             peer->cccd_handle = tmp[0].handle;
             peer->ready = true;
+            peer->stream_stopped = false;
+            peer->stop_stream_command = false;
             ESP_LOGI(DEVICE_NAME, "CCCD handle=%u (peer %d) - READY", peer->cccd_handle, slot);
-        } else {
+        }
+        else
+        {
             ESP_LOGE(DEVICE_NAME, "CCCD (0x2902) not found (peer %d)", slot);
         }
 
@@ -1246,7 +1232,4 @@ void app_main(void)
 
     // Pulsanti: scrivono CCCD quando disponibile
     xTaskCreate(button_task, "btn_task", 2048, NULL, 5, NULL);
-
-    // Multi-connection + auto-reconnect manager
-    // xTaskCreate(connect_manager_task, "conn_mgr", 3072, NULL, 6, NULL);
 }

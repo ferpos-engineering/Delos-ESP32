@@ -39,7 +39,6 @@
 
 #include "include/dataloss.h"
 #include "include/prettyprinter.h"
-#include "include/nvs_manager.h"
 
 #ifndef INVALID_HANDLE
 #define INVALID_HANDLE 0
@@ -48,11 +47,25 @@
 // --------------------- CONFIG ---------------------
 
 #define MTU                         23
+
+// Number of BLE Profiles
 #define PROFILE_NUM                 1
+
+// Application ID of the BLE profile
 #define PROFILE_A_APP_ID            0
 
+// Maximum number of peers which could be connected.
+#define PEERS_NUM                   3
+
+// Duration in seconds of the scan of peers          
+#define PEERS_SCAN_TIME_S           7
+
+// Name of the peer
 #define REMOTE_DEVICE_NAME          "DPPS-DTS"
-#define REMOTE_SERVICE_UUID         0x1815   // AUTO_IO_SVC_UUID nel tuo server
+
+// AUTO_IO_SVC_UUID in the peer
+#define REMOTE_SERVICE_UUID         0x1815
+
 #define LED_DATALOSS                6
 #define LED_THROTTLING_MS           2000
 
@@ -72,16 +85,22 @@
 
 static const char *DEVICE_NAME = "DPPS-DONGLE";
 
-// --------------------- Peers context ---------------------
+/**
+ * MAC hardcoded dei peripherals (MODIFICA QUI).
+ * Ogni MAC è 6 byte: {0xAA,0xBB,0xCC,0xDD,0xEE,0xFF}
+ */
+static const esp_bd_addr_t TARGET_MACS[PEERS_NUM] = {
+    { 0xcc, 0xba, 0x97, 0xf2, 0x86, 0xb6 }, // peripheral #0 - mac0   
+    { 0xe4, 0xb0, 0x63, 0x41, 0x09, 0x8a }, // peripheral #1 - mac1
+    { 0xe4, 0xb0, 0x63, 0x41, 0x11, 0xbe }, // peripheral #2 - mac2
+};
 
-// Allowed peers for connections
-const esp_bd_addr_t* target_macs = NULL;
+// --------------------- Peers context ---------------------
 
 typedef struct {
     bool            connected;       // true after CONNECT_EVT
     bool            service_ok;      // target service discovered
     bool            ready;           // CCCD handle found (can enable notify)
-    bool            want_reconnect;  // set on disconnect to auto-reconnect
 
     esp_bd_addr_t       bda;
     esp_ble_addr_type_t addr_type;
@@ -101,7 +120,7 @@ typedef struct {
     int64_t         next_reconnect_try_us;
 } peer_ctx_t;
 
-static peer_ctx_t s_peers[NVS_MGR_MAX_PEERS] = {0};
+static peer_ctx_t s_peers[PEERS_NUM];
 
 // connection manager: allow only one esp_ble_gattc_open at a time (avoid ESP_GATT_BUSY)
 static volatile bool s_open_in_progress = false;
@@ -147,7 +166,7 @@ static esp_bt_uuid_t remote_led_char_uuid = {
 // CCCD UUID 0x2902
 static esp_bt_uuid_t notify_descr_uuid = {
     .len = ESP_UUID_LEN_16,
-    .uuid = {.uuid16 = ESP_GATT_UUID_CHAR_CLIENT_CONFIG,},
+    .uuid = {.uuid16 = ESP_GATT_UUID_CHAR_CLIENT_CONFIG},
 };
 
 static struct gattc_profile_inst gl_profile_tab[PROFILE_NUM];
@@ -166,7 +185,7 @@ typedef struct {
     int64_t window_start_us;
 } notify_stats_t;
 
-static notify_stats_t notify_stats_peers[NVS_MGR_MAX_PEERS];
+static notify_stats_t notify_stats_peers[PEERS_NUM];
 
 // --------------------- STREAM duration ---------------------
 
@@ -178,7 +197,7 @@ typedef struct {
     uint64_t bytes;
 } stream_timer_t;
 
-static stream_timer_t stream_timers_peers[NVS_MGR_MAX_PEERS];
+static stream_timer_t stream_timers_peers[PEERS_NUM];
 
 // --------------------- Helpers ---------------------
 
@@ -221,24 +240,12 @@ static void ble_rf_tune_on_connect(esp_bd_addr_t peer_bda)
     }
 }
 
-static bool bda_matches_target_macs(const esp_bd_addr_t bda)
+static int get_slot_of_target_mac(const esp_bd_addr_t bda)
 {
-    for (uint8_t i = 0; i < NVS_MGR_MAX_PEERS; i++) {
-        if (memcmp(bda, target_macs[i], sizeof(esp_bd_addr_t)) == 0) return true;
+    for (uint8_t i = 0; i < PEERS_NUM; i++) {
+        if (memcmp(bda, TARGET_MACS[i], sizeof(esp_bd_addr_t)) == 0) return i;
     }
-    return false;
-}
-
-static bool adv_name_matches(const uint8_t *adv_data, const char *name)
-{
-    uint8_t len = 0;
-    // API vuole uint8_t* (non const), facciamo cast (adv_data non viene modificato)
-    uint8_t *p = esp_ble_resolve_adv_data((uint8_t *)adv_data, ESP_BLE_AD_TYPE_NAME_CMPL, &len);
-    if (p && len) {
-        size_t nlen = strlen(name);
-        return (nlen == len) && (memcmp(p, name, len) == 0);
-    }
-    return false;
+    return -1;
 }
 
 static void buttons_init(void)
@@ -258,48 +265,56 @@ static bool bda_equal(const esp_bd_addr_t a, const esp_bd_addr_t b)
     return memcmp(a, b, sizeof(esp_bd_addr_t)) == 0;
 }
 
-static int slot_find_by_bda(const esp_bd_addr_t bda)
+static int find_slot_by_bda(const esp_bd_addr_t bda)
 {
-    for (int i = 0; i < NVS_MGR_MAX_PEERS; i++) {
-        if (bda_equal(target_macs[i], bda)) return i;
+    for (int i = 0; i < PEERS_NUM; i++) {
+        if (bda_equal(TARGET_MACS[i], bda)) return i;
     }
     return -1;
 }
 
-static int slot_find_by_conn_id(uint16_t conn_id)
+static int find_slot_by_conn_id(uint16_t conn_id)
 {
-    for (int i = 0; i < NVS_MGR_MAX_PEERS; i++) {
+    for (int i = 0; i < PEERS_NUM; i++)
+    {
+        ESP_LOGW("find_slot_by_conn_id", "conn_id=%d,s_peers[%d].conn_id=%d, connected=%d, ready=%d", conn_id, i, s_peers[i].conn_id, s_peers[i].connected, s_peers[i].ready);
+        if (s_peers[i].conn_id == conn_id) return i;
+    }
+    return -1;
+}
+
+static int find_connected_slot_by_conn_id(uint16_t conn_id)
+{
+    for (int i = 0; i < PEERS_NUM; i++)
+    {
+        ESP_LOGW("find_connected_slot_by_conn_id", "conn_id=%d,s_peers[%d].conn_id=%d, connected=%d, ready=%d", conn_id, i, s_peers[i].conn_id, s_peers[i].connected, s_peers[i].ready);
         if (s_peers[i].connected && s_peers[i].conn_id == conn_id) return i;
     }
     return -1;
 }
 
-static int slot_find_by_char_handle(uint16_t char_handle)
+static int find_connected_slot_by_char_handle(uint16_t char_handle)
 {
-    for (int i = 0; i < NVS_MGR_MAX_PEERS; i++) {
-        if (!s_peers[i].ready && s_peers[i].char_handle == char_handle) return i;
+    for (int i = 0; i < PEERS_NUM; i++) {
+        if (s_peers[i].connected && !s_peers[i].ready && s_peers[i].char_handle == char_handle) return i;
     }
     return -1;
 }
 
-static void peer_set_gatt_state(int slot, esp_ble_addr_type_t addr_type)
+static int find_ready_slot_by_conn_id(uint16_t conn_id)
 {
-    peer_ctx_t* peer = &s_peers[slot]; 
-
-    memset(&peer, 0, sizeof(peer));
-    peer->connected = false;
-    peer->service_ok = false;
-    peer->ready = false;
-    peer->want_reconnect = true; // candidate wants connection
-    memcpy(peer->bda, target_macs[slot], sizeof(esp_bd_addr_t));
-    peer->addr_type = addr_type;
-    peer->conn_id = 0xFFFF;
-    peer->s_last_led_dataloss_cmd_us = -1;
-    peer->next_reconnect_try_us = 0;
+    for (int i = 0; i < PEERS_NUM; i++)
+    {
+        if (s_peers[i].connected && s_peers[i].ready && s_peers[i].conn_id == conn_id) return i;
+    }
+    return -1;
 }
 
-static void peer_reset_gatt_state(peer_ctx_t* peer)
+static void peer_reset_gatt_state(int slot)
 {
+    peer_ctx_t* peer = &s_peers[slot];
+    memcpy(peer->bda, TARGET_MACS[slot], sizeof(esp_bd_addr_t));
+    peer->addr_type = BLE_ADDR_TYPE_PUBLIC;
     peer->connected = false;
     peer->service_ok = false;
     peer->ready = false;
@@ -308,6 +323,9 @@ static void peer_reset_gatt_state(peer_ctx_t* peer)
     peer->service_end_handle = 0;
     peer->char_handle = 0;
     peer->cccd_handle = 0;
+    peer->led_char_handle = 0;
+    peer->s_last_led_dataloss_cmd_us = -1;
+    peer->next_reconnect_try_us = esp_timer_get_time() + 1000 * 1000;
 }
 
 static esp_err_t cccd_write(int slot, uint16_t value)
@@ -322,7 +340,7 @@ static esp_err_t cccd_write(int slot, uint16_t value)
 
     ESP_LOGI(DEVICE_NAME, "CCCD write request: (peer=%d) connected=%d, ready=%d, cccd_handle=%u", slot, peer->connected, peer->ready, peer->cccd_handle);
 
-    struct gattc_profile_inst *profile = &gl_profile_tab[PROFILE_A_APP_ID];
+    struct gattc_profile_inst* profile = &gl_profile_tab[PROFILE_A_APP_ID];
 
     if (profile->gattc_if == ESP_GATT_IF_NONE) {
         ESP_LOGW(DEVICE_NAME, "CCCD write skipped (gattc_if not ready)");
@@ -427,7 +445,7 @@ static void button_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(BTN_DEBOUNCE_MS));
             if (gpio_get_level(BTN_ENABLE_GPIO) == 0) {
                 ESP_LOGI(DEVICE_NAME, "BTN_ENABLE -> enable notify");
-                for(int i = 0; i < NVS_MGR_MAX_PEERS; i++)
+                for(int i = 0; i < PEERS_NUM; i++)
                 {
                     cccd_write(i, 0x0001);
                 }
@@ -438,7 +456,7 @@ static void button_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(BTN_DEBOUNCE_MS));
             if (gpio_get_level(BTN_DISABLE_GPIO) == 0) {
                 ESP_LOGI(DEVICE_NAME, "BTN_DISABLE -> disable notify");
-                for(int i = 0; i < NVS_MGR_MAX_PEERS; i++)
+                for(int i = 0; i < PEERS_NUM; i++)
                 {
                     cccd_write(i, 0x0000);
                 }
@@ -451,49 +469,50 @@ static void button_task(void *arg)
     }
 }
 
-static void connect_manager_task(void *arg)
-{
-    struct gattc_profile_inst* profile = &gl_profile_tab[PROFILE_A_APP_ID];
+// static void connect_manager_task(void *arg)
+// {
+//     struct gattc_profile_inst* profile = &gl_profile_tab[PROFILE_A_APP_ID];
 
-    while (1) {
-        if (profile->gattc_if != ESP_GATT_IF_NONE && !s_open_in_progress) {
-            int64_t now_us = esp_timer_get_time();
+//     while (1)
+//     {
+//         if (profile->gattc_if != ESP_GATT_IF_NONE && !s_open_in_progress)
+//         {
+//             int64_t now_us = esp_timer_get_time();
+//             int slot = -1;
+//             peer_ctx_t* peer = NULL;
+//             for (int i = 0; i < PEERS_NUM; i++)
+//             {
+//                 peer = &s_peers[i];
+//                 if (!peer->connected)
+//                 {
+//                     slot = i;
+//                     break;
+//                 }
+//             }
 
-            int connected_cnt = 0;
-            for (int i = 0; i < NVS_MGR_MAX_PEERS; i++) {
-                if (s_peers[i].connected) connected_cnt++;
-            }
+//             if (slot >= 0 && (peer->next_reconnect_try_us == 0 || now_us >= peer->next_reconnect_try_us))
+//             {
+//                 esp_err_t err = esp_ble_gattc_open(profile->gattc_if, peer->bda, peer->addr_type, true);
+//                 if (err == ESP_OK)
+//                 {
+//                     s_open_in_progress = true;
+//                     ESP_LOGI(DEVICE_NAME,
+//                             "Connecting peer=%d to %02X:%02X:%02X:%02X:%02X:%02X",
+//                             slot,
+//                             peer->bda[0], peer->bda[1], peer->bda[2], peer->bda[3], peer->bda[4], peer->bda[5]);
 
-            if (connected_cnt < NVS_MGR_MAX_PEERS) {
-                for (int i = 0; i < NVS_MGR_MAX_PEERS; i++) {
-                    peer_ctx_t* peer = &s_peers[i];
-                    if (peer->connected) continue;
+//                 }
+//                 else
+//                 {
+//                     // busy/invalid state -> retry later
+//                     peer->next_reconnect_try_us = now_us + 1000 * 1000; // 1s backoff
+//                 }
+//             }
+//         }
 
-                    if (peer->next_reconnect_try_us != 0 && now_us < peer->next_reconnect_try_us) {
-                        continue;
-                    }
-
-                    if (peer->want_reconnect) {
-                        esp_err_t err = esp_ble_gattc_open(profile->gattc_if, peer->bda, peer->addr_type, true);
-                        if (err == ESP_OK) {
-                            s_open_in_progress = true;
-                            ESP_LOGI(DEVICE_NAME,
-                                     "Connecting slot %d to %02X:%02X:%02X:%02X:%02X:%02X",
-                                     i,
-                                     peer->bda[0], peer->bda[1], peer->bda[2], peer->bda[3], peer->bda[4], peer->bda[5]);
-                            break;
-                        } else {
-                            // busy/invalid state -> retry later
-                            peer->next_reconnect_try_us = now_us + 1000 * 1000; // 1s backoff
-                        }
-                    }
-                }
-            }
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(200));
-    }
-}
+//         vTaskDelay(pdMS_TO_TICKS(200));
+//     }
+// }
 
 // --------------------- Callbacks ---------------------
 
@@ -526,7 +545,7 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
     switch (event)
     {
         case ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT:
-            esp_ble_gap_start_scanning(0);
+            ESP_ERROR_CHECK(esp_ble_gap_start_scanning(PEERS_SCAN_TIME_S));
             break;
 
         case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT:
@@ -538,35 +557,29 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
             switch (param->scan_rst.search_evt)
             {
                 case ESP_GAP_SEARCH_INQ_RES_EVT:
+                {
+                    int slot = get_slot_of_target_mac(param->scan_rst.bda);
+                    if (slot < 0 || slot >= PEERS_NUM)
                     {
-                        bool match = false;
-
-                        // If MAC targets are configured, accept ONLY those.
-                        if (NVS_MGR_MAX_PEERS > 0) {
-                            match = bda_matches_target_macs(param->scan_rst.bda);
-                            if (!match) {
-                                break;
-                            }
-                            ESP_LOGI(DEVICE_NAME,
-                                     "Found target MAC %02X:%02X:%02X:%02X:%02X:%02X -> connect",
-                                     param->scan_rst.bda[0], param->scan_rst.bda[1], param->scan_rst.bda[2],
-                                     param->scan_rst.bda[3], param->scan_rst.bda[4], param->scan_rst.bda[5]);
-                        } else {
-                            // Fallback: match by advertised device name (current behaviour)
-                            match = adv_name_matches(param->scan_rst.ble_adv, REMOTE_DEVICE_NAME);
-                            if (!match) {
-                                break;
-                            }
-                            ESP_LOGI(DEVICE_NAME, "Found '%s' -> connect", REMOTE_DEVICE_NAME);
-                        }
-
-                        // esp_ble_gap_stop_scanning();
-                        esp_ble_gattc_open(gl_profile_tab[PROFILE_A_APP_ID].gattc_if,
-                                           param->scan_rst.bda,
-                                           param->scan_rst.ble_addr_type,
-                                           true);
+                        ESP_LOGI(DEVICE_NAME,
+                                    "Scan found generic MAC %02X:%02X:%02X:%02X:%02X:%02X",
+                                    param->scan_rst.bda[0], param->scan_rst.bda[1], param->scan_rst.bda[2],
+                                    param->scan_rst.bda[3], param->scan_rst.bda[4], param->scan_rst.bda[5]);
+                        break;
                     }
+
+                    ESP_LOGI(DEVICE_NAME,
+                                "Scan found TARGET MAC %02X:%02X:%02X:%02X:%02X:%02X --> peer=%d, connect...",
+                                param->scan_rst.bda[0], param->scan_rst.bda[1], param->scan_rst.bda[2],
+                                param->scan_rst.bda[3], param->scan_rst.bda[4], param->scan_rst.bda[5],
+                                slot);
+
+                    ESP_ERROR_CHECK(esp_ble_gattc_open(gl_profile_tab[PROFILE_A_APP_ID].gattc_if,
+                                        param->scan_rst.bda,
+                                        param->scan_rst.ble_addr_type,
+                                        true));
                     break;
+                }
 
                 case ESP_GAP_SEARCH_INQ_CMPL_EVT:
                     ESP_LOGI(DEVICE_NAME, "Scan complete");
@@ -699,7 +712,8 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 {
     switch (event)
     {
-    case ESP_GATTC_REG_EVT: {
+    case ESP_GATTC_REG_EVT:
+    {
         ESP_LOGI(DEVICE_NAME, "REG_EVT ok, set scan params");
         esp_err_t err = esp_ble_gap_set_scan_params(&ble_scan_params);
         if (err != ESP_OK) {
@@ -708,115 +722,26 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         break;
     }
 
-    case ESP_GATTC_OPEN_EVT: {
-        if (param->open.status != ESP_GATT_OK) {
-            ESP_LOGW(DEVICE_NAME, "OPEN_EVT failed status=%d", param->open.status);
-            int slot = slot_find_by_bda(param->open.remote_bda);
-            if (slot >= 0) {
-                peer_reset_gatt_state(&s_peers[slot]);
-                s_peers[slot].want_reconnect = true;
-                s_peers[slot].next_reconnect_try_us = esp_timer_get_time() + 1000 * 1000;
-            }
-            s_open_in_progress = false;
+    case ESP_GATTC_OPEN_EVT:
+    {
+        int slot = find_slot_by_bda(param->open.remote_bda);
+        if (slot < 0 || slot >= PEERS_NUM)
+        {
             break;
         }
 
-        ESP_LOGI(DEVICE_NAME, "OPEN_EVT status=%d, conn_id=%d", param->open.status, param->open.conn_id);
+        if(param->open.status == ESP_GATT_OK)
+        {
+            ESP_LOGI(DEVICE_NAME, "OPEN_EVT peer=%d status=%d, conn_id=%d", slot, param->open.status, param->open.conn_id);
+            peer_ctx_t* peer = &s_peers[slot];
+            peer->conn_id = param->open.conn_id;
+        }
+        else
+        {
+            ESP_LOGW(DEVICE_NAME, "OPEN_EVT peer=%d failed status=%d", slot, param->open.status);
+        }
+
         s_open_in_progress = false;
-        break;
-    }
-
-    case ESP_GATTC_CONNECT_EVT: {
-
-        ESP_LOGI(DEVICE_NAME,
-            "ESP_GATTC_CONNECT_EVT (conn_id=%d)",
-            param->connect.conn_id
-        );
-
-        int slot = slot_find_by_bda(param->connect.remote_bda);
-        if (slot < 0) {
-            ESP_LOGE(DEVICE_NAME, "slot_find_by_conn_id failed");
-            break;
-        }
-
-        peer_set_gatt_state(slot, BLE_ADDR_TYPE_PUBLIC);
-
-        ESP_LOGI(DEVICE_NAME, "CONNECT_EVT conn_id=%d", param->connect.conn_id);
-
-        peer_ctx_t* peer = &s_peers[slot];
-        peer->connected = true;
-        peer->want_reconnect = true;
-        peer->conn_id = param->connect.conn_id;
-        peer->service_ok = false;
-        peer->ready = false;
-        memcpy(peer->bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
-
-        ble_rf_tune_on_connect(param->connect.remote_bda);
-
-        esp_err_t ret = esp_ble_gap_read_phy(peer->bda);
-        if (ret)
-        {
-            ESP_LOGE(DEVICE_NAME, "esp_ble_gap_read_phy failed");
-        }
-
-        // MTU request (opzionale)
-        ret = esp_ble_gattc_send_mtu_req(gattc_if, peer->conn_id);
-        if (ret)
-        {
-            ESP_LOGE(DEVICE_NAME, "esp_ble_gattc_send_mtu_req failed");
-        }
-
-        ret = esp_ble_gap_read_rssi(peer->bda);
-        if (ret)
-        {
-            ESP_LOGE(DEVICE_NAME, "esp_ble_gap_read_rssi failed");
-        }
-
-        esp_power_level_t tx_power = esp_ble_tx_power_get(
-            ESP_BLE_PWR_TYPE_CONN_HDL0 + peer->conn_id
-        );
-
-        ESP_LOGI(DEVICE_NAME, "Local TX Power (conn_id=%d): %d dBm",
-                 peer->conn_id,
-                 prettyprinter_get_tx_power_dbm(tx_power));
-
-        ret = esp_ble_gap_read_remote_transmit_power_level(peer->conn_id, ESP_BLE_CONN_TX_POWER_PHY_1M);
-        if (ret)
-        {
-            ESP_LOGE(DEVICE_NAME, "esp_ble_gap_read_remote_transmit_power_level failed");
-        }
-
-        break;
-    }
-
-    case ESP_GATTC_CFG_MTU_EVT:
-        ESP_LOGI(DEVICE_NAME, "CFG_MTU_EVT conn_id=%d mtu=%d", param->cfg_mtu.conn_id, param->cfg_mtu.mtu);
-        ESP_ERROR_CHECK(esp_ble_gattc_search_service(gattc_if, param->cfg_mtu.conn_id, NULL));
-        break;
-
-    case ESP_GATTC_SEARCH_RES_EVT: {
-
-        ESP_LOGI(DEVICE_NAME,
-            "ESP_GATTC_SEARCH_RES_EVT (conn_id=%d)",
-            param->search_res.conn_id
-        );
-
-        int slot = slot_find_by_conn_id(param->search_res.conn_id);
-        if (slot < 0) {
-            ESP_LOGE(DEVICE_NAME, "slot_find_by_conn_id failed");
-            break;
-        }
-        peer_ctx_t* peer = &s_peers[slot];
-        esp_gatt_id_t *srvc_id = &param->search_res.srvc_id;
-
-        if (srvc_id->uuid.len == ESP_UUID_LEN_16 &&
-            srvc_id->uuid.uuid.uuid16 == REMOTE_SERVICE_UUID) {
-
-            ESP_LOGI(DEVICE_NAME, "Found service 0x%04x (peer %d, conn_id=%u)", REMOTE_SERVICE_UUID, slot, peer->conn_id);
-            peer->service_ok = true;
-            peer->service_start_handle = param->search_res.start_handle;
-            peer->service_end_handle   = param->search_res.end_handle;
-        }
         break;
     }
 
@@ -827,9 +752,10 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
             param->search_cmpl.conn_id
         );
 
-        int slot = slot_find_by_conn_id(param->search_cmpl.conn_id);
-        if (slot < 0) {
-            ESP_LOGE(DEVICE_NAME, "slot_find_by_conn_id failed");
+        int slot = find_slot_by_conn_id(param->search_cmpl.conn_id);
+        if (slot < 0 || slot >= PEERS_NUM)
+        {
+            ESP_LOGE(DEVICE_NAME, "find_slot_by_conn_id failed");
             break;
         }
         peer_ctx_t* peer = &s_peers[slot];
@@ -916,67 +842,30 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         break;
     }
 
-    case ESP_GATTC_REG_FOR_NOTIFY_EVT: {
-
-        int slot = slot_find_by_char_handle(param->reg_for_notify.handle);
-        if (slot < 0) {
-            ESP_LOGE(DEVICE_NAME, "slot_find_by_char_handle failed");
-            break;
-        }
-
-        peer_ctx_t* peer = &s_peers[slot];
+    case ESP_GATTC_SEARCH_RES_EVT:
+    {
         ESP_LOGI(DEVICE_NAME,
-            "REG_FOR_NOTIFY Notify registered: (slot=%d) handle=%u status=%d char_handle=%u",
-            slot,
-            param->reg_for_notify.handle,
-            param->reg_for_notify.status,
-            peer->char_handle
+            "ESP_GATTC_SEARCH_RES_EVT (conn_id=%d)",
+            param->search_res.conn_id
         );
 
-        if (param->reg_for_notify.status != ESP_GATT_OK) {
-            ESP_LOGE(DEVICE_NAME, "REG_FOR_NOTIFY failed (peer %d), status=%d", slot, param->reg_for_notify.status);
+        int slot = find_slot_by_conn_id(param->search_res.conn_id);
+        if (slot < 0 || slot >= PEERS_NUM)
+        {
+            ESP_LOGE(DEVICE_NAME, "find_slot_by_conn_id failed");
             break;
         }
+        peer_ctx_t* peer = &s_peers[slot];
+        esp_gatt_id_t *srvc_id = &param->search_res.srvc_id;
 
-        // Find CCCD descriptor (0x2902)
-        uint16_t count = 0;
-        ESP_ERROR_CHECK(esp_ble_gattc_get_attr_count(gattc_if, peer->conn_id,
-                                     ESP_GATT_DB_DESCRIPTOR,
-                                     peer->service_start_handle,
-                                     peer->service_end_handle,
-                                     peer->char_handle,
-                                     &count));
+        if (srvc_id->uuid.len == ESP_UUID_LEN_16 &&
+            srvc_id->uuid.uuid.uuid16 == REMOTE_SERVICE_UUID) {
 
-        if (count == 0) {
-            ESP_LOGE(DEVICE_NAME, "No descriptors found for STREAM char (peer %d)", slot);
-            break;
+            ESP_LOGI(DEVICE_NAME, "Found service 0x%04x (peer %d, conn_id=%u)", REMOTE_SERVICE_UUID, slot, peer->conn_id);
+            peer->service_ok = true;
+            peer->service_start_handle = param->search_res.start_handle;
+            peer->service_end_handle   = param->search_res.end_handle;
         }
-
-        esp_gattc_descr_elem_t *tmp = (esp_gattc_descr_elem_t *)malloc(sizeof(esp_gattc_descr_elem_t) * count);
-        if (!tmp) {
-            ESP_LOGE(DEVICE_NAME, "malloc descr_elem_result failed");
-            break;
-        }
-
-            esp_gatt_status_t  ret_status = esp_ble_gattc_get_descr_by_char_handle(gattc_if,
-                                                                peer->conn_id,
-                                                                param->reg_for_notify.handle,
-                                                                notify_descr_uuid,
-                                                                tmp,
-                                                                &count);
-            if (ret_status != ESP_GATT_OK){
-                ESP_LOGE(DEVICE_NAME, "esp_ble_gattc_get_descr_by_char_handle error");
-            }
-
-        if (count > 0) {
-            peer->cccd_handle = tmp[0].handle;
-            peer->ready = true;
-            ESP_LOGI(DEVICE_NAME, "CCCD handle=%u (peer %d) - READY", peer->cccd_handle, slot);
-        } else {
-            ESP_LOGE(DEVICE_NAME, "CCCD (0x2902) not found (peer %d)", slot);
-        }
-
-        free(tmp);
         break;
     }
 
@@ -988,13 +877,15 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         ESP_LOGI(DEVICE_NAME, "WRITE_DESCR_EVT ok (handle=%u)", param->write.handle);
         break;
 
-    case ESP_GATTC_NOTIFY_EVT: {
-        // ---------- NOTIFY stats (PRO) ----------
-        int slot = slot_find_by_conn_id(param->notify.conn_id);
-        if (slot < 0) {
-            ESP_LOGE(DEVICE_NAME, "slot_find_by_conn_id failed");
+    case ESP_GATTC_NOTIFY_EVT:
+    {
+        int slot = find_ready_slot_by_conn_id(param->notify.conn_id);
+        if (slot < 0 || slot >= PEERS_NUM)
+        {
+            ESP_LOGE(DEVICE_NAME, "find_ready_slot_by_conn_id failed");
             break;
         }
+
         peer_ctx_t* peer = &s_peers[slot];
 
         int64_t now_us = esp_timer_get_time();
@@ -1093,28 +984,149 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         break;
     }
 
-    case ESP_GATTC_DISCONNECT_EVT: {
-        int slot = slot_find_by_conn_id(param->disconnect.conn_id);
-        ESP_LOGI(DEVICE_NAME, "DISCONNECT peer=%d, conn_id=%d reason=0x%02x", slot, param->disconnect.conn_id, param->disconnect.reason);
+    case ESP_GATTC_CFG_MTU_EVT:
+        ESP_LOGI(DEVICE_NAME, "CFG_MTU_EVT conn_id=%d mtu=%d", param->cfg_mtu.conn_id, param->cfg_mtu.mtu);
+        ESP_ERROR_CHECK(esp_ble_gattc_search_service(gattc_if, param->cfg_mtu.conn_id, NULL));
+        break;
 
-        if(slot < 0)
+    case ESP_GATTC_REG_FOR_NOTIFY_EVT: {
+
+        int slot = find_connected_slot_by_char_handle(param->reg_for_notify.handle);
+        if (slot < 0 || slot >= PEERS_NUM)
         {
-            ESP_LOGE(DEVICE_NAME, "slot_find_by_conn_id does not find conn_id=%d", param->disconnect.conn_id);
+            ESP_LOGE(DEVICE_NAME, "find_connected_slot_by_char_handle failed");
             break;
         }
 
         peer_ctx_t* peer = &s_peers[slot];
-        peer_reset_gatt_state(peer);
-        peer->want_reconnect = true;
-        peer->next_reconnect_try_us = esp_timer_get_time() + 1000 * 1000;
+        ESP_LOGI(DEVICE_NAME,
+            "REG_FOR_NOTIFY Notify registered: (peer=%d) handle=%u status=%d char_handle=%u",
+            slot,
+            param->reg_for_notify.handle,
+            param->reg_for_notify.status,
+            peer->char_handle
+        );
+
+        if (param->reg_for_notify.status != ESP_GATT_OK) {
+            ESP_LOGE(DEVICE_NAME, "REG_FOR_NOTIFY failed (peer %d), status=%d", slot, param->reg_for_notify.status);
+            break;
+        }
+
+        // Find CCCD descriptor (0x2902)
+        uint16_t count = 0;
+        ESP_ERROR_CHECK(esp_ble_gattc_get_attr_count(gattc_if, peer->conn_id,
+                                     ESP_GATT_DB_DESCRIPTOR,
+                                     peer->service_start_handle,
+                                     peer->service_end_handle,
+                                     peer->char_handle,
+                                     &count));
+
+        if (count == 0) {
+            ESP_LOGE(DEVICE_NAME, "No descriptors found for STREAM char (peer %d)", slot);
+            break;
+        }
+
+        esp_gattc_descr_elem_t *tmp = (esp_gattc_descr_elem_t *)malloc(sizeof(esp_gattc_descr_elem_t) * count);
+        if (!tmp) {
+            ESP_LOGE(DEVICE_NAME, "malloc descr_elem_result failed");
+            break;
+        }
+
+            esp_gatt_status_t  ret_status = esp_ble_gattc_get_descr_by_char_handle(gattc_if,
+                                                                peer->conn_id,
+                                                                param->reg_for_notify.handle,
+                                                                notify_descr_uuid,
+                                                                tmp,
+                                                                &count);
+            if (ret_status != ESP_GATT_OK){
+                ESP_LOGE(DEVICE_NAME, "esp_ble_gattc_get_descr_by_char_handle error");
+            }
+
+        if (count > 0) {
+            peer->cccd_handle = tmp[0].handle;
+            peer->ready = true;
+            ESP_LOGI(DEVICE_NAME, "CCCD handle=%u (peer %d) - READY", peer->cccd_handle, slot);
+        } else {
+            ESP_LOGE(DEVICE_NAME, "CCCD (0x2902) not found (peer %d)", slot);
+        }
+
+        free(tmp);
+        break;
+    }
+
+    case ESP_GATTC_CONNECT_EVT:
+    {
+        ESP_LOGI(DEVICE_NAME,
+            "ESP_GATTC_CONNECT_EVT (conn_id=%d)",
+            param->connect.conn_id
+        );
+
+        int slot = find_slot_by_bda(param->connect.remote_bda);
+        if (slot < 0 || slot >= PEERS_NUM)
+        {
+            ESP_LOGE(DEVICE_NAME, "find_slot_by_bda failed");
+            break;
+        }
+
+        peer_ctx_t* peer = &s_peers[slot];
+        peer->connected = true;
+        peer->conn_id = param->connect.conn_id;
+        peer->service_ok = false;
+        peer->ready = false;
+        peer->next_reconnect_try_us = 0;
+        memcpy(peer->bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
+
+        ble_rf_tune_on_connect(param->connect.remote_bda);
+
+        esp_err_t ret = esp_ble_gap_read_phy(peer->bda);
+        if (ret)
+        {
+            ESP_LOGE(DEVICE_NAME, "esp_ble_gap_read_phy failed");
+        }
+
+        // MTU request (opzionale)
+        ret = esp_ble_gattc_send_mtu_req(gattc_if, peer->conn_id);
+        if (ret)
+        {
+            ESP_LOGE(DEVICE_NAME, "esp_ble_gattc_send_mtu_req failed");
+        }
+
+        ret = esp_ble_gap_read_rssi(peer->bda);
+        if (ret)
+        {
+            ESP_LOGE(DEVICE_NAME, "esp_ble_gap_read_rssi failed");
+        }
+
+        esp_power_level_t tx_power = esp_ble_tx_power_get(
+            ESP_BLE_PWR_TYPE_CONN_HDL0 + peer->conn_id
+        );
+
+        ESP_LOGI(DEVICE_NAME, "Local TX Power (conn_id=%d): %d dBm",
+                 peer->conn_id,
+                 prettyprinter_get_tx_power_dbm(tx_power));
+
+        ret = esp_ble_gap_read_remote_transmit_power_level(peer->conn_id, ESP_BLE_CONN_TX_POWER_PHY_1M);
+        if (ret)
+        {
+            ESP_LOGE(DEVICE_NAME, "esp_ble_gap_read_remote_transmit_power_level failed");
+        }
+
+        break;
+    }
+
+    case ESP_GATTC_DISCONNECT_EVT: {
+        int slot = find_connected_slot_by_conn_id(param->disconnect.conn_id);
+        ESP_LOGI(DEVICE_NAME, "DISCONNECT peer=%d, conn_id=%d reason=0x%02x", slot, param->disconnect.conn_id, param->disconnect.reason);
+
+        if (slot < 0 || slot >= PEERS_NUM)
+        {
+            ESP_LOGE(DEVICE_NAME, "find_connected_slot_by_conn_id does not find conn_id=%d", param->disconnect.conn_id);
+            break;
+        }
+
+
+        peer_reset_gatt_state(slot);
         ESP_LOGI(DEVICE_NAME, "Peer %d scheduled for auto-reconnect", slot);
-        
-        peer->service_start_handle = 0;
-        peer->service_end_handle = 0;
-        peer->char_handle = 0;
-        peer->cccd_handle = 0;
-        peer->led_char_handle = 0;
-        peer->s_last_led_dataloss_cmd_us = -1;
 
         // reset stats
         notify_stats_t* notify_stats = &notify_stats_peers[slot];
@@ -1126,7 +1138,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         notify_stats->window_start_us = 0;
 
         // Keep scanning so that returning peers are seen quickly
-        esp_ble_gap_start_scanning(0);
+        esp_ble_gap_start_scanning(PEERS_SCAN_TIME_S);
         break;
     }
 
@@ -1137,9 +1149,19 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 
 // --------------------- app_main ---------------------
 
+esp_err_t nvs_manager_init_flash(void)
+{
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    return ret;
+}
+
 void app_main(void)
 {
-    for(int i = 0; i < NVS_MGR_MAX_PEERS; i++)
+    for(int i = 0; i < PEERS_NUM; i++)
     {
         notify_stats_t* notify_stats = &notify_stats_peers[i];
         notify_stats->last_us = -1;
@@ -1155,6 +1177,8 @@ void app_main(void)
 		stream_timers->last_us = -1;
 		stream_timers->packets = 0;
 		stream_timers->bytes = 0;
+
+        peer_reset_gatt_state(i);
     }
 
     dataloss_init();
@@ -1165,14 +1189,6 @@ void app_main(void)
     gl_profile_tab[PROFILE_A_APP_ID].app_id = PROFILE_A_APP_ID;
 
     ESP_ERROR_CHECK(nvs_manager_init_flash());
-
-    bool wrote = false;
-    ESP_ERROR_CHECK(nvs_manager_bootstrap_defaults(&wrote));
-    if (wrote) {
-        ESP_LOGI(DEVICE_NAME, "Default MAC list written to NVS");
-    }
-
-    nvs_manager_get_target_macs(&target_macs);
 
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
 
@@ -1232,5 +1248,5 @@ void app_main(void)
     xTaskCreate(button_task, "btn_task", 2048, NULL, 5, NULL);
 
     // Multi-connection + auto-reconnect manager
-    xTaskCreate(connect_manager_task, "conn_mgr", 3072, NULL, 6, NULL);
+    // xTaskCreate(connect_manager_task, "conn_mgr", 3072, NULL, 6, NULL);
 }

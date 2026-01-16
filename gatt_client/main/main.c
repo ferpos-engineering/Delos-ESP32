@@ -399,6 +399,8 @@ void start_streams()
 {
     for(int i = 0; i < PEERS_NUM; i++)
     {
+        s_peers[i].stream_stopped = false;
+        s_peers[i].stop_stream_command = false;
         cccd_write(i, 0x0001);
     }
 }
@@ -408,6 +410,7 @@ void stop_streams()
     for(int i = 0; i < PEERS_NUM; i++)
     {
         cccd_write(i, 0x0000);
+        s_peers[i].stream_stopped = true;
     }
 }
 
@@ -472,7 +475,7 @@ static void button_task(void *arg)
         if (prev_en == 1 && en == 0) {
             vTaskDelay(pdMS_TO_TICKS(BTN_DEBOUNCE_MS));
             if (gpio_get_level(BTN_ENABLE_GPIO) == 0) {
-                ESP_LOGI(DEVICE_NAME, "BTN_ENABLE -> enable notify");
+                ESP_LOGI(DEVICE_NAME, "BTN_ENABLE -> enable notify"); 
                 start_streams();
             }
         }
@@ -935,7 +938,6 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
             ESP_LOGI(DEVICE_NAME, "peer=%d Dataloss percentage %f%%", slot, dataloss_get_loss_percentage(slot));
             ESP_LOGI(DEVICE_NAME, "peer=%d Number of losses %u", slot, dataloss_number_losses(slot));
             ESP_LOGI(DEVICE_NAME, "peer=%d DISABLE -> disable notify", slot );
-            peer->stream_stopped = false;
             peer->stop_stream_command = true;
         }
         else
@@ -1027,8 +1029,6 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         {
             peer->cccd_handle = tmp[0].handle;
             peer->ready = true;
-            peer->stream_stopped = false;
-            peer->stop_stream_command = false;
             ESP_LOGI(DEVICE_NAME, "CCCD handle=%u (peer %d) - READY", peer->cccd_handle, slot);
         }
         else

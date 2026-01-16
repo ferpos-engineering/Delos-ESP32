@@ -37,7 +37,7 @@
 #define ADV_CONFIG_FLAG      (1 << 0)
 #define SCAN_RSP_CONFIG_FLAG (1 << 1)
 
-#define ESP_PWR_LVL ESP_PWR_LVL_N0
+#define ESP_PWR_LVL ESP_PWR_LVL_P9
 
 struct gatts_profile_inst {
     esp_gatts_cb_t gatts_cb;

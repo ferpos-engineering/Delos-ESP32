@@ -68,7 +68,7 @@
 #define BTN_POLL_MS                 20
 #define BTN_DEBOUNCE_MS             50
 
-#define ESP_PWR_LVL ESP_PWR_LVL_N0
+#define ESP_PWR_LVL ESP_PWR_LVL_P9
 
 static const char *DEVICE_NAME = "DPPS-DONGLE";
 
@@ -152,8 +152,6 @@ static esp_bt_uuid_t notify_descr_uuid = {
 
 static struct gattc_profile_inst gl_profile_tab[PROFILE_NUM];
 
-static esp_gattc_char_elem_t  *char_elem_result  = NULL;
-static esp_gattc_descr_elem_t *descr_elem_result = NULL;
 
 // --------------------- NOTIFY stats ---------------------
 
@@ -314,15 +312,15 @@ static void peer_reset_gatt_state(peer_ctx_t* peer)
 
 static esp_err_t cccd_write(int slot, uint16_t value)
 {
-    ESP_LOGI(DEVICE_NAME, "CCCD write request: 0x%04x (peers=%d)", value, slot);
+    ESP_LOGI(DEVICE_NAME, "CCCD write request: 0x%04x (peer=%d)", value, slot);
 
     peer_ctx_t* peer = &s_peers[slot];
     if (!peer->connected || !peer->ready) {
-        ESP_LOGI(DEVICE_NAME, "CCCD write request failed: (peers=%d) connected=%d, ready=%d, cccd_handle=%u", slot, peer->connected, peer->ready, peer->cccd_handle);
+        ESP_LOGI(DEVICE_NAME, "CCCD write request failed: (peer=%d) connected=%d, ready=%d, cccd_handle=%u", slot, peer->connected, peer->ready, peer->cccd_handle);
         return ESP_OK;
     }
 
-    ESP_LOGI(DEVICE_NAME, "CCCD write request: (peers=%d) connected=%d, ready=%d, cccd_handle=%u", slot, peer->connected, peer->ready, peer->cccd_handle);
+    ESP_LOGI(DEVICE_NAME, "CCCD write request: (peer=%d) connected=%d, ready=%d, cccd_handle=%u", slot, peer->connected, peer->ready, peer->cccd_handle);
 
     struct gattc_profile_inst *profile = &gl_profile_tab[PROFILE_A_APP_ID];
 
@@ -363,15 +361,17 @@ static esp_err_t cccd_write(int slot, uint16_t value)
         if (stream_t->active && stream_t->start_us >= 0 && stream_t->last_us >= 0) {
             int64_t dur_us = stream_t->last_us - stream_t->start_us;
             ESP_LOGI(DEVICE_NAME,
-                    "STREAM duration: %.3f s, packets=%" PRIu32 ", bytes=%" PRIu64,
-                    dur_us / 1000000.0, stream_t->packets, stream_t->bytes);
+                    "STREAM duration peer=%d: %.3f s, packets=%" PRIu32 ", bytes=%" PRIu64,
+                    slot,
+                    dur_us / 1000000.0,
+                    stream_t->packets, stream_t->bytes);
         } else {
-            ESP_LOGW(DEVICE_NAME, "STREAM duration: no data received");
+            ESP_LOGW(DEVICE_NAME, "STREAM duration peer=%d: no data received", slot);
         }
         stream_t->active = false;
     }
 
-    ESP_LOGI(DEVICE_NAME, "CCCD write requested: 0x%04x (peers=%d)", value, slot);
+    ESP_LOGI(DEVICE_NAME, "CCCD write requested: 0x%04x (peer=%d)", value, slot);
 
     return ESP_OK;
 }
@@ -669,17 +669,17 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
 
             // Nota: 0x7E e 0x7F sono valori "speciali" (not managing / not available)
             if ((uint8_t)pwr == 0x7E) {
-                ESP_LOGW(DEVICE_NAME, "Remote TX POWER report: remote not managing power on this PHY (conn=0x%04X phy=%s reason=%u)",
+                ESP_LOGW(DEVICE_NAME, "Remote TX POWER report: remote not managing power on this PHY (conn_handle=%u phy=%s reason=%u)",
                         param->trans_power_report_evt.conn_handle,
                         phy,
                         param->trans_power_report_evt.reason);
             } else if ((uint8_t)pwr == 0x7F) {
-                ESP_LOGW(DEVICE_NAME, "Remote TX POWER report: power not available (conn=0x%04X phy=%s reason=%u)",
+                ESP_LOGW(DEVICE_NAME, "Remote TX POWER report: power not available (conn_handle=%u phy=%s reason=%u)",
                         param->trans_power_report_evt.conn_handle,
                         phy,
                         param->trans_power_report_evt.reason);
             } else {
-                ESP_LOGI(DEVICE_NAME, "Remote TX POWER report: %d dBm (conn=0x%04X phy=%s reason=%u delta=%d flag=0x%02X)",
+                ESP_LOGI(DEVICE_NAME, "Remote TX POWER report: %d dBm (conn_handle=%u phy=%s reason=%u delta=%d flag=0x%02X)",
                         pwr,
                         param->trans_power_report_evt.conn_handle,
                         phy,
@@ -697,8 +697,6 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
 
 static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param)
 {
-    struct gattc_profile_inst* profile = &gl_profile_tab[PROFILE_A_APP_ID];
-
     switch (event)
     {
     case ESP_GATTC_REG_EVT: {
@@ -737,7 +735,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 
         int slot = slot_find_by_bda(param->connect.remote_bda);
         if (slot < 0) {
-            ESP_LOGE(DEVICE_NAME, "peer_find_by_bda failed");
+            ESP_LOGE(DEVICE_NAME, "slot_find_by_conn_id failed");
             break;
         }
 
@@ -805,7 +803,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 
         int slot = slot_find_by_conn_id(param->search_res.conn_id);
         if (slot < 0) {
-            ESP_LOGE(DEVICE_NAME, "peer_find_by_conn_id failed");
+            ESP_LOGE(DEVICE_NAME, "slot_find_by_conn_id failed");
             break;
         }
         peer_ctx_t* peer = &s_peers[slot];
@@ -831,7 +829,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 
         int slot = slot_find_by_conn_id(param->search_cmpl.conn_id);
         if (slot < 0) {
-            ESP_LOGE(DEVICE_NAME, "peer_find_by_conn_id failed");
+            ESP_LOGE(DEVICE_NAME, "slot_find_by_conn_id failed");
             break;
         }
         peer_ctx_t* peer = &s_peers[slot];
@@ -994,7 +992,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         // ---------- NOTIFY stats (PRO) ----------
         int slot = slot_find_by_conn_id(param->notify.conn_id);
         if (slot < 0) {
-            ESP_LOGE(DEVICE_NAME, "peer_find_by_conn_id failed");
+            ESP_LOGE(DEVICE_NAME, "slot_find_by_conn_id failed");
             break;
         }
         peer_ctx_t* peer = &s_peers[slot];
@@ -1073,12 +1071,12 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
             if (loss)
             {
                 int num_samples_lost = dataloss_get_last_loss_amplitude(slot);
-                ESP_LOGW(DEVICE_NAME, "DATA LOSS, lost %d samples", num_samples_lost);
+                ESP_LOGW(DEVICE_NAME, "DATA LOSS, peer=%d lost %d samples", slot, num_samples_lost);
             }
 
             if (wrong_data_len)
             {
-                ESP_LOGW(DEVICE_NAME, "DATA LOSS, received only %d bytes", param->notify.value_len);
+                ESP_LOGW(DEVICE_NAME, "DATA LOSS, peer=%d received only %d bytes", slot, param->notify.value_len);
             }
 
             // Comanda il LED del SERVER in stato DATALOSS (scrive 0x06 sulla char LED).
@@ -1097,11 +1095,11 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
 
     case ESP_GATTC_DISCONNECT_EVT: {
         int slot = slot_find_by_conn_id(param->disconnect.conn_id);
-        ESP_LOGI(DEVICE_NAME, "DISCONNECT conn_id=%d reason=0x%02x", param->disconnect.conn_id, param->disconnect.reason);
+        ESP_LOGI(DEVICE_NAME, "DISCONNECT peer=%d, conn_id=%d reason=0x%02x", slot, param->disconnect.conn_id, param->disconnect.reason);
 
         if(slot < 0)
         {
-            ESP_LOGE(DEVICE_NAME, "peer_find_by_conn_id does not find conn_id=%d", param->disconnect.conn_id);
+            ESP_LOGE(DEVICE_NAME, "slot_find_by_conn_id does not find conn_id=%d", param->disconnect.conn_id);
             break;
         }
 

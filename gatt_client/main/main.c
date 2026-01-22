@@ -239,14 +239,6 @@ static void ble_rf_tune_on_connect(esp_bd_addr_t peer_bda)
     }
 }
 
-static int get_slot_of_target_mac(const esp_bd_addr_t bda)
-{
-    for (uint8_t i = 0; i < PEERS_NUM; i++) {
-        if (memcmp(bda, TARGET_MACS[i], sizeof(esp_bd_addr_t)) == 0) return i;
-    }
-    return -1;
-}
-
 static void buttons_init(void)
 {
     gpio_config_t io = {
@@ -538,7 +530,7 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
             {
                 case ESP_GAP_SEARCH_INQ_RES_EVT:
                 {
-                    int slot = get_slot_of_target_mac(param->scan_rst.bda);
+                    int slot = find_slot_by_bda(param->scan_rst.bda);
                     if (slot < 0 || slot >= PEERS_NUM)
                     {
                         ESP_LOGI(DEVICE_NAME,

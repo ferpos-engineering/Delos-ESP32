@@ -1,0 +1,36 @@
+.\python.exe -E -s -m esptool `
+  --chip esp32c6 `
+  -p COM12 `
+  --before default-reset `
+  --after hard-reset `
+  erase-flash
+
+
+.\python.exe -E -s -m esptool `
+  --chip esp32c6 `
+  -p COM12 `
+  -b 460800 `
+  --before default-reset `
+  --after hard-reset `
+  write-flash `
+  --flash-mode dio `
+  --flash-freq 80m `
+  --flash-size detect `
+  0x0 C:\Users\User\source\Delos-ESP32\gatt_client\build\bootloader\bootloader.bin `
+  0x8000 C:\Users\User\source\Delos-ESP32\gatt_client\build\partition_table\partition-table.bin `
+  0x10000 C:\Users\User\source\Delos-ESP32\gatt_client\build\gatt_client_demo.bin
+
+
+.\python.exe -E -s -m esptool `
+  --chip esp32c6 `
+  -p COM12 `
+  -b 460800 `
+  --before default-reset `
+  --after hard-reset `
+  write-flash `
+  --flash-mode dio `
+  --flash-freq 80m `
+  --flash-size detect `
+  0x0 C:\Users\User\source\Delos-ESP32\gatt_server\build\bootloader\bootloader.bin `
+  0x8000 C:\Users\User\source\Delos-ESP32\gatt_server\build\partition_table\partition-table.bin `
+  0x10000 C:\Users\User\source\Delos-ESP32\gatt_server\build\gatt_server.bin
